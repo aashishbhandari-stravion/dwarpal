@@ -64,8 +64,9 @@ export function isAuthError(value) {
   return value instanceof AuthError;
 }
 
-// Issues are produced by the validators in this package from sanitized paths
-// and fixed rule names; copying keeps only those two string fields.
+// Issues are produced by the validators in this package from structural paths
+// (fixed field names, indexes and member positions, never caller keys) and
+// fixed rule names; copying keeps only those two string fields.
 function copyIssues(issues) {
   if (!Array.isArray(issues)) return [];
   const out = [];

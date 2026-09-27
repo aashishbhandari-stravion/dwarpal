@@ -4,11 +4,12 @@
 // principal or key fail closed.
 
 import { AuthError } from './errors.js';
-import { isPlainObject, isStringArray } from './shape.js';
+import { isPlainObject, isOpaqueKey, isDenseArray, isStringArray } from './shape.js';
 
 function readAccess(principal) {
   if (!isPlainObject(principal) || !isPlainObject(principal.access)) return null;
   const { roles, activeRoles, permissions } = principal.access;
+  // Dense string arrays only: a hole is not a role or a key.
   if (!isStringArray(roles) || !isStringArray(activeRoles) || !isStringArray(permissions)) return null;
   // An active role that is not held is an impossible state: refuse it rather
   // than guess which list is right.
@@ -16,18 +17,16 @@ function readAccess(principal) {
   return principal.access;
 }
 
-function isKey(key) {
-  return typeof key === 'string' && key !== '';
-}
-
+// Array methods skip holes, so a sparse list would be judged on fewer keys
+// than it names; an all-hole list would be vacuously granted.
 function hasKeys(keys) {
-  return Array.isArray(keys) && keys.length > 0 && keys.every(isKey);
+  return isDenseArray(keys) && keys.length > 0 && keys.every(isOpaqueKey);
 }
 
 /** True when an active role grants `key`. */
 export function can(principal, key) {
   const access = readAccess(principal);
-  return access !== null && isKey(key) && access.permissions.includes(key);
+  return access !== null && isOpaqueKey(key) && access.permissions.includes(key);
 }
 
 /** True when every key is granted. An empty list is never granted. */
@@ -50,7 +49,7 @@ export function canAny(principal, keys) {
 export function explain(principal, key) {
   const allowed = can(principal, key);
   const access = readAccess(principal);
-  if (access === null || !isKey(key) || !Array.isArray(principal.memberships)) {
+  if (access === null || !isOpaqueKey(key) || !isDenseArray(principal.memberships)) {
     return { allowed, via: [], withheld: [] };
   }
   const via = [];
@@ -93,7 +92,7 @@ export function requireRole(principal, roles) {
   if (access === null || !hasKeys(wanted)) throw new AuthError('forbidden');
   if (wanted.some((role) => access.activeRoles.includes(role))) return principal;
   const withheld = principal.session?.aal !== 'aal2' && wanted.some((role) => {
-    if (!access.roles.includes(role) || !Array.isArray(principal.memberships)) return false;
+    if (!access.roles.includes(role) || !isDenseArray(principal.memberships)) return false;
     const membership = principal.memberships.find((m) => isPlainObject(m) && m.roleKey === role);
     return membership?.flags?.mfaRequired === true;
   });

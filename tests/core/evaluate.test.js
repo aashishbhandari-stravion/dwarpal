@@ -188,3 +188,55 @@ test('client scoping: a principal carries only its configured client', () => {
   const p = fixturePrincipal({ roles: ['patron'] });
   assert.equal(can(p, 'records:read:own'), true);
 });
+
+test('sparse or inherited-index key lists never satisfy a check', () => {
+  const p = P.patron;
+  assert.equal(canAll(null, Array(1)), false);
+  assert.equal(canAny(null, Array(1)), false);
+  assert.equal(canAll(p, Array(1)), false);
+  const mixed = ['records:read:own'];
+  mixed.length = 2;
+  assert.equal(canAll(p, mixed), false);
+  assert.equal(canAny(p, mixed), false);
+  // Index 0 is inherited, not own: array methods would still visit it.
+  const proto = Object.create(Array.prototype);
+  proto[0] = 'records:read:own';
+  const inherited = Object.setPrototypeOf(new Array(1), proto);
+  assert.equal(canAll(p, inherited), false);
+  assert.equal(canAny(p, inherited), false);
+  const sparseRoles = ['patron'];
+  sparseRoles.length = 2;
+  assert.throws(() => requireRole(p, sparseRoles), code('forbidden'));
+  // Deliberate empty lists and dense lists keep their meaning.
+  assert.equal(canAll(p, []), false);
+  assert.equal(canAll(p, ['records:read:own']), true);
+  assert.equal(canAny(p, ['nope', 'records:read:own']), true);
+  assert.equal(requireRole(p, ['patron']), p);
+});
+
+test('a hand-built principal with sparse access or provenance fails closed', () => {
+  for (const field of ['roles', 'activeRoles', 'permissions']) {
+    const q = structuredClone(P.patron);
+    q.access[field].length += 1;
+    assert.equal(can(q, 'records:read:own'), false, field);
+    assert.throws(() => requirePermission(q, 'records:read:own'), code('forbidden'), field);
+  }
+  const noted = structuredClone(P.patronClerkAal1);
+  for (const m of noted.memberships) m.permissions.length += 1;
+  assert.deepEqual(explain(noted, 'files:upload:any'), { allowed: false, via: [], withheld: [] });
+  const holes = structuredClone(P.patronClerkAal1);
+  holes.memberships.length += 1;
+  assert.deepEqual(explain(holes, 'files:upload:any'), { allowed: false, via: [], withheld: [] });
+});
+
+test('evaluation uses the same opaque-key rule as the model', () => {
+  const q = structuredClone(P.patron);
+  q.access.permissions.push('invoice/read', 'façade:lire');
+  assert.equal(can(q, 'invoice/read'), true);
+  assert.equal(canAll(q, ['invoice/read', 'façade:lire']), true);
+  for (const bad of ['', 'a\u0000b', '\ud800']) {
+    q.access.permissions.push(bad);
+    assert.equal(can(q, bad), false, JSON.stringify(bad));
+    assert.equal(canAny(q, [bad]), false, JSON.stringify(bad));
+  }
+});

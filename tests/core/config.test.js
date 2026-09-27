@@ -51,7 +51,8 @@ test('route overrides stay under the prefix and must be distinct segments', () =
   assert.deepEqual(issuesOf(validConfig({ routes: { signIn: 'verify' } })), ['routes.verify:duplicate']);
   assert.deepEqual(issuesOf(validConfig({ routes: { signIn: '../admin' } })), ['routes.signIn:segment_syntax']);
   assert.deepEqual(issuesOf(validConfig({ routes: { prefix: '/' } })), ['routes.prefix:unsafe_path']);
-  assert.deepEqual(issuesOf(validConfig({ routes: { admin: 'x' } })), ['routes.admin:unknown_field']);
+  // Unknown keys are named by position in canonical key order, never by name.
+  assert.deepEqual(issuesOf(validConfig({ routes: { admin: 'x' } })), ['routes.#0:unknown_field']);
 });
 
 test('booleans must be real booleans', () => {
@@ -62,7 +63,8 @@ test('booleans must be real booleans', () => {
 });
 
 test('undeclared keys and missing fields are refused', () => {
-  assert.deepEqual(issuesOf(validConfig({ secretKey: 'x' })), ['secretKey:unknown_field']);
+  // secretKey is #6 of the config's own keys in canonical order.
+  assert.deepEqual(issuesOf(validConfig({ secretKey: 'x' })), ['#6:unknown_field']);
   const missing = validConfig();
   delete missing.origin;
   assert.deepEqual(issuesOf(missing), ['origin:required']);
@@ -103,11 +105,51 @@ test('brand, copy and session are bounded', () => {
     session: { accessTokenMinutes: 15 },
   }));
   assert.equal(ok.brand.colors.primary, '#123abc');
-  assert.deepEqual(issuesOf(validConfig({ brand: { name: 'S', colors: { primary: 'red;background:url(x)' } } })), ['brand.colors.primary:not_hex_color']);
+  assert.deepEqual(issuesOf(validConfig({ brand: { name: 'S', colors: { primary: 'red;background:url(x)' } } })), ['brand.colors.#0:not_hex_color']);
   assert.deepEqual(issuesOf(validConfig({ brand: { name: 'S', logoUrl: 'javascript:alert(1)' } })), ['brand.logoUrl:unsafe_url']);
   assert.deepEqual(issuesOf(validConfig({ brand: { name: 'S', fontStack: 'x;}body{display:none' } })), ['brand.fontStack:type']);
-  assert.deepEqual(issuesOf(validConfig({ copy: { 'a b': 'x' } })), ['copy.<invalid-key>:key_syntax']);
+  assert.deepEqual(issuesOf(validConfig({ copy: { 'a b': 'x' } })), ['copy.#0:key_syntax']);
   for (const minutes of [0, 1.5, '30', 1441, Number.NaN]) {
     assert.deepEqual(issuesOf(validConfig({ session: { accessTokenMinutes: minutes } })), ['session.accessTokenMinutes:out_of_range']);
   }
+});
+
+test('malformed route parts give config_invalid, never a native error', () => {
+  const toStringNull = () => JSON.parse('{"toString":null}');
+  const cases = [
+    [{ signIn: toStringNull() }, ['routes.signIn:segment_syntax']],
+    [{ signIn: null }, ['routes.signIn:segment_syntax']],
+    [{ signIn: ['login'] }, ['routes.signIn:segment_syntax']],
+    [{ signIn: 7 }, ['routes.signIn:segment_syntax']],
+    [{ prefix: toStringNull() }, ['routes.prefix:unsafe_path']],
+    [{ prefix: null }, ['routes.prefix:unsafe_path']],
+    [{ prefix: ['/auth'] }, ['routes.prefix:unsafe_path']],
+    [{ prefix: 'auth' }, ['routes.prefix:unsafe_path']],
+    [{ prefix: '/auth/' }, ['routes.prefix:unsafe_path']],
+    [{ prefix: toStringNull(), signOut: toStringNull() }, ['routes.prefix:unsafe_path', 'routes.signOut:segment_syntax']],
+  ];
+  for (const [routes, expected] of cases) {
+    let err;
+    try {
+      validateClientConfig(validConfig({ routes }));
+    } catch (caught) {
+      err = caught;
+    }
+    assert.ok(err instanceof AuthError, `${JSON.stringify(expected)}: ${err}`);
+    assert.equal(err.code, 'config_invalid');
+    assert.equal(err.message, 'The client configuration is invalid.');
+    assert.deepEqual(err.issues.map((i) => `${i.path}:${i.rule}`), expected);
+  }
+  // Valid routes behave as before.
+  assert.equal(validateClientConfig(validConfig({ routes: { prefix: '/auth', signIn: 'login' } })).routes.signIn, '/auth/login');
+});
+
+test('client ids are opaque; return-path lists must be dense', () => {
+  assert.equal(validateClientConfig(validConfig({ clientId: 'shop/eu 1' })).clientId, 'shop/eu 1');
+  for (const bad of ['', 'a\u0000b', '\ud800', 5]) {
+    assert.deepEqual(issuesOf(validConfig({ clientId: bad })), ['clientId:invalid_key']);
+  }
+  const holes = ['/'];
+  holes.length = 2;
+  assert.deepEqual(issuesOf(validConfig({ allowedReturnPaths: holes })), ['allowedReturnPaths:type']);
 });

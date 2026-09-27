@@ -2,7 +2,13 @@
 
 export declare const AUTH_CONTRACT_VERSION: '0.5';
 
+/**
+ * Role keys, permission keys and client ids are opaque client-defined strings.
+ * Any non-empty string without NUL or an unpaired surrogate is valid; the
+ * `resource:action[:scope]` form for permission keys is a recommendation.
+ */
 export type RoleKey = string;
+/** Opaque; see RoleKey. Recommended form `resource:action` or `resource:action:scope`. */
 export type PermissionKey = string;
 export type Provider = 'email' | 'google';
 export type Aal = 'aal1' | 'aal2';
@@ -85,6 +91,12 @@ export type AuthErrorCode =
 export declare const AUTH_ERROR_CODES: readonly AuthErrorCode[];
 
 export interface ValidationIssue {
+  /**
+   * Structural location only: fixed field names, `[i]` for an array index and
+   * `#i` for a caller-chosen key, where i is the key's position among the
+   * object's own keys in UTF-16 code-unit order (`roles.#1.permissions[0]`).
+   * Caller-chosen keys and values never appear.
+   */
   readonly path: string;
   readonly rule: string;
 }

@@ -5,14 +5,14 @@
 
 import { AuthError } from './errors.js';
 import {
-  CLIENT_ID_PATTERN,
-  ROLE_KEY_PATTERN,
-  PERMISSION_KEY_PATTERN,
   UUID_PATTERN,
   TIMESTAMP_PATTERN,
   isPlainObject,
+  isOpaqueKey,
+  isDenseArray,
   isStringArray,
-  extraKeys,
+  hasExtraKeys,
+  own,
   deepFreeze,
   sortedUnique,
   compareCodeUnits,
@@ -31,14 +31,13 @@ const MAX_ROLE_PERMISSIONS = 2048;
  */
 export function createPrincipal(snapshot) {
   if (!isPlainObject(snapshot)) fail();
-  const { clientId, identity, session, enrolledAt, memberships } = snapshot;
-  if (extraKeys(snapshot, ['clientId', 'identity', 'session', 'enrolledAt', 'memberships']).length > 0) fail();
-  if (typeof clientId !== 'string' || !CLIENT_ID_PATTERN.test(clientId)) fail();
+  const { clientId, identity, session, enrolledAt, memberships } = ownFields(snapshot, ['clientId', 'identity', 'session', 'enrolledAt', 'memberships']);
+  if (!isOpaqueKey(clientId)) fail();
   if (enrolledAt !== null && !isTimestamp(enrolledAt)) fail();
 
   const id = readIdentity(identity);
   const sess = readSession(session);
-  if (!Array.isArray(memberships) || memberships.length > MAX_MEMBERSHIPS) fail();
+  if (!isDenseArray(memberships) || memberships.length > MAX_MEMBERSHIPS) fail();
   const rows = memberships.map((row) => readMembership(row, clientId));
   rows.sort((a, b) => compareCodeUnits(a.roleKey, b.roleKey));
   for (let i = 1; i < rows.length; i += 1) {
@@ -60,8 +59,7 @@ export function createPrincipal(snapshot) {
 
 function readIdentity(value) {
   if (!isPlainObject(value)) fail();
-  if (extraKeys(value, ['userId', 'verifiedEmail', 'providers']).length > 0) fail();
-  const { userId, verifiedEmail, providers } = value;
+  const { userId, verifiedEmail, providers } = ownFields(value, ['userId', 'verifiedEmail', 'providers']);
   if (typeof userId !== 'string' || !UUID_PATTERN.test(userId)) fail();
   if (verifiedEmail !== null && (typeof verifiedEmail !== 'string' || verifiedEmail === '' || verifiedEmail.length > 320)) fail();
   if (!isStringArray(providers) || !providers.every((p) => PROVIDERS.includes(p))) fail();
@@ -71,8 +69,7 @@ function readIdentity(value) {
 
 function readSession(value) {
   if (!isPlainObject(value)) fail();
-  if (extraKeys(value, ['id', 'aal', 'issuedAt', 'expiresAt', 'checkedAt']).length > 0) fail();
-  const { id, aal, issuedAt, expiresAt, checkedAt } = value;
+  const { id, aal, issuedAt, expiresAt, checkedAt } = ownFields(value, ['id', 'aal', 'issuedAt', 'expiresAt', 'checkedAt']);
   if (typeof id !== 'string' || id === '' || id.length > 128) fail();
   // An unknown assurance level is never treated as aal1 or aal2.
   if (!AAL_LEVELS.includes(aal)) fail();
@@ -82,27 +79,35 @@ function readSession(value) {
 
 function readMembership(row, clientId) {
   if (!isPlainObject(row)) fail();
-  if (extraKeys(row, ['clientId', 'roleKey', 'flags', 'grantedAt', 'grantedVia', 'permissions']).length > 0) fail();
+  const fields = ownFields(row, ['clientId', 'roleKey', 'flags', 'grantedAt', 'grantedVia', 'permissions']);
   // Principal is scoped to the configured client only; a row for any other
   // client means the read was not scoped and nothing from it can be trusted.
-  if (row.clientId !== clientId) fail();
-  if (typeof row.roleKey !== 'string' || !ROLE_KEY_PATTERN.test(row.roleKey)) fail();
-  const flags = row.flags;
-  if (!isPlainObject(flags) || extraKeys(flags, ['selfAssignable', 'managesMembers', 'mfaRequired']).length > 0) fail();
-  const { selfAssignable, managesMembers, mfaRequired } = flags;
+  if (fields.clientId !== clientId) fail();
+  if (!isOpaqueKey(fields.roleKey)) fail();
+  if (!isPlainObject(fields.flags)) fail();
+  const { selfAssignable, managesMembers, mfaRequired } = ownFields(fields.flags, ['selfAssignable', 'managesMembers', 'mfaRequired']);
   if (typeof selfAssignable !== 'boolean' || typeof managesMembers !== 'boolean' || typeof mfaRequired !== 'boolean') fail();
-  if (!isTimestamp(row.grantedAt) || !GRANTED_VIA.includes(row.grantedVia)) fail();
-  const permissions = row.permissions;
+  if (!isTimestamp(fields.grantedAt) || !GRANTED_VIA.includes(fields.grantedVia)) fail();
+  const permissions = fields.permissions;
   if (!isStringArray(permissions) || permissions.length > MAX_ROLE_PERMISSIONS) fail();
-  if (!permissions.every((key) => PERMISSION_KEY_PATTERN.test(key))) fail();
+  if (!permissions.every(isOpaqueKey)) fail();
   return {
     clientId,
-    roleKey: row.roleKey,
+    roleKey: fields.roleKey,
     flags: { selfAssignable, managesMembers, mfaRequired },
-    grantedAt: row.grantedAt,
-    grantedVia: row.grantedVia,
+    grantedAt: fields.grantedAt,
+    grantedVia: fields.grantedVia,
     permissions: sortedUnique(permissions),
   };
+}
+
+// Exactly the named own fields: any other key fails, and a missing name reads
+// as undefined rather than as an inherited property.
+function ownFields(object, names) {
+  if (hasExtraKeys(object, names)) fail();
+  const out = {};
+  for (const name of names) out[name] = own(object, name);
+  return out;
 }
 
 function isTimestamp(value) {

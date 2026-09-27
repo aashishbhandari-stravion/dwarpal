@@ -74,7 +74,7 @@ test('invalid external shapes and booleans fail closed with unavailable', () => 
   const cases = {
     notObject: null,
     extraTopLevel: { ...snapshot(), cached: true },
-    badClient: snapshot({ clientId: '../x' }),
+    emptyClient: snapshot({ clientId: '' }),
     badEnrolled: snapshot({ enrolledAt: 'yesterday' }),
     badUser: snapshot({ identity: { userId: 'not-a-uuid', verifiedEmail: null, providers: [] } }),
     badProvider: snapshot({ identity: { userId: USER, verifiedEmail: null, providers: ['github'] } }),
@@ -88,7 +88,10 @@ test('invalid external shapes and booleans fail closed with unavailable', () => 
     missingFlag: snapshot({ memberships: [row({ flags: { selfAssignable: true, managesMembers: false } })] }),
     extraFlag: snapshot({ memberships: [row({ flags: { selfAssignable: true, managesMembers: false, mfaRequired: false, superuser: true } })] }),
     missingPermissions: snapshot({ memberships: [row({ permissions: undefined })] }),
-    badPermission: snapshot({ memberships: [row({ permissions: ['has space'] })] }),
+    emptyPermission: snapshot({ memberships: [row({ permissions: [''] })] }),
+    nulPermission: snapshot({ memberships: [row({ permissions: ['a\u0000b'] })] }),
+    surrogatePermission: snapshot({ memberships: [row({ permissions: ['\udc00'] })] }),
+    emptyRole: snapshot({ memberships: [row({ roleKey: '' })] }),
     badVia: snapshot({ memberships: [row({ grantedVia: 'self' })] }),
     dupRole: snapshot({ memberships: [row(), row()] }),
     membershipsNotArray: snapshot({ memberships: {} }),
@@ -96,4 +99,32 @@ test('invalid external shapes and booleans fail closed with unavailable', () => 
   for (const [name, input] of Object.entries(cases)) {
     assert.throws(() => createPrincipal(input), unavailable, name);
   }
+});
+
+test('sparse arrays in a snapshot give unavailable, never a native error', () => {
+  const holes = (values, extra = 1) => {
+    const out = [...values];
+    out.length += extra;
+    return out;
+  };
+  const cases = {
+    memberships: snapshot({ memberships: holes([row()]) }),
+    allHoleMemberships: snapshot({ memberships: Array(2) }),
+    rowPermissions: snapshot({ memberships: [row({ permissions: holes(['items:read:own']) })] }),
+    providers: snapshot({ identity: { userId: USER, verifiedEmail: null, providers: holes(['email']) } }),
+  };
+  for (const [name, input] of Object.entries(cases)) {
+    assert.throws(() => createPrincipal(input), unavailable, name);
+  }
+  assert.deepEqual(createPrincipal(snapshot({ memberships: [] })).access.roles, []);
+  assert.deepEqual(createPrincipal(snapshot({ memberships: [row({ permissions: [] })] })).access.permissions, []);
+});
+
+test('snapshot keys are opaque like model keys', () => {
+  const p = createPrincipal(snapshot({
+    clientId: 'shop/eu 1',
+    memberships: [row({ clientId: 'shop/eu 1', roleKey: 'constructor', permissions: ['invoice/read', 'façade:lire'] })],
+  }));
+  assert.deepEqual(p.access.roles, ['constructor']);
+  assert.deepEqual(p.access.permissions, ['façade:lire', 'invoice/read']);
 });

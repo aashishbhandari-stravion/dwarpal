@@ -104,3 +104,73 @@ test('snapshot and evaluation errors carry no input data', () => {
   assert.equal(denied.code, 'forbidden');
   assert.ok(!surfaces(denied).includes('MARKER'));
 });
+
+// A secret-shaped marker that is also a perfectly ordinary key: syntax cannot
+// tell a pasted secret from a name, so no caller key may reach a diagnostic.
+const PLAIN_SECRET = ['sb', 'secret', 'PLAINmark0123456789'].join('_');
+// Letters and digits only, the shape of an ordinary config field name.
+const ALNUM_SECRET = ['sb', 'secret', 'ALNUMmark0123'].join('');
+const MARKERS = [SECRET, ATTACKER, PLAIN_SECRET, ALNUM_SECRET];
+
+function assertNoMarker(err) {
+  const text = surfaces(err);
+  for (const marker of ['MARKER', 'PLAINmark', 'ALNUMmark']) assert.ok(!text.includes(marker), text);
+}
+
+function keyed(...pairs) {
+  const out = {};
+  for (const [key, value] of pairs) Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+  return out;
+}
+
+test('model diagnostics name caller keys by position only', () => {
+  for (const marker of MARKERS) {
+    const err = capture(() => validateModel({
+      client: 'shop',
+      roles: keyed(['boss', { manages_members: true, permissions: [marker] }], [marker, { manages_members: 'yes', [marker]: 1 }]),
+      permissions: keyed([marker, null]),
+      [marker]: 1,
+    }));
+    assert.equal(err.code, 'model_invalid');
+    assertNoMarker(err);
+    assert.ok(err.issues.length >= 4);
+    for (const issue of err.issues) assert.match(issue.path, /^(#\d+|[a-z_]+(\.#\d+|\.[a-z_]+|\[\d+\])*)$/, issue.path);
+  }
+  const err = capture(() => validateModel({ client: 'shop', roles: { boss: { manages_members: true } }, permissions: { [PLAIN_SECRET]: null } }));
+  assert.deepEqual(err.issues, [{ path: 'permissions.#0', rule: 'type' }]);
+});
+
+test('plan and holder diagnostics name caller keys by position only', () => {
+  const model = { client: 'shop', roles: { boss: { manages_members: true } }, permissions: {} };
+  for (const marker of MARKERS) {
+    const err = capture(() => planModelChange(model, { ...model, [marker]: 1 }, { state: 'live', holders: keyed([marker, ['x']], ['boss', [marker]]) }));
+    assert.equal(err.code, 'model_invalid');
+    assertNoMarker(err);
+    // Where each key sorts depends on the marker; the structure does not.
+    assert.deepEqual(err.issues.map((i) => i.rule).sort(), ['type', 'unknown_field', 'unknown_role']);
+    for (const issue of err.issues) assert.match(issue.path, /^(context\.holders|next)\.#\d$/, issue.path);
+  }
+});
+
+test('config diagnostics name caller keys by position only', () => {
+  for (const marker of MARKERS) {
+    const err = capture(() => validateClientConfig({
+      clientId: 'shop',
+      supabaseUrl: 'https://project-ref.supabase.co',
+      publishableKey: 'sb_publishable_abc',
+      origin: 'https://shop.example',
+      allowedReturnPaths: ['/'],
+      defaultReturnPath: '/',
+      providers: { email: true, google: false, [marker]: true },
+      routes: { [marker]: 'x' },
+      session: { [marker]: 1 },
+      brand: { name: 'S', [marker]: 1, colors: { [marker]: 'red' } },
+      copy: { [marker]: 5 },
+      selfSignup: true,
+      [marker]: 1,
+    }));
+    assert.equal(err.code, 'config_invalid');
+    assertNoMarker(err);
+    assert.ok(err.issues.length >= 7);
+  }
+});

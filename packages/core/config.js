@@ -4,7 +4,16 @@
 
 import { AuthError } from './errors.js';
 import { isSafeConfiguredPath } from './redirect.js';
-import { CLIENT_ID_PATTERN, isPlainObject, extraKeys, deepFreeze } from './shape.js';
+import {
+  isPlainObject,
+  isOpaqueKey,
+  isDenseArray,
+  own,
+  sortedKeys,
+  memberPath,
+  extraKeyPositions,
+  deepFreeze,
+} from './shape.js';
 
 export const ROUTE_NAMES = Object.freeze(['signIn', 'signUp', 'verify', 'callback', 'forgot', 'reset', 'mfa', 'signOut']);
 
@@ -44,16 +53,16 @@ export function validateClientConfig(config) {
     add('$', 'not_object');
     throw new AuthError('config_invalid', { issues });
   }
-  for (const key of extraKeys(config, CONFIG_FIELDS)) add(fieldName(key), 'unknown_field');
+  for (const position of extraKeyPositions(config, CONFIG_FIELDS)) add(memberPath('', position), 'unknown_field');
 
-  if (typeof config.clientId !== 'string' || !CLIENT_ID_PATTERN.test(config.clientId)) add('clientId', ruleFor(config.clientId, 'key_syntax'));
+  if (!isOpaqueKey(config.clientId)) add('clientId', ruleFor(config.clientId, 'invalid_key'));
   const supabaseUrl = readOrigin(config.supabaseUrl, 'supabaseUrl', add);
   const origin = readOrigin(config.origin, 'origin', add);
   checkPublishableKey(config.publishableKey, add);
   const routes = readRoutes(config.routes, add);
 
   const allowed = config.allowedReturnPaths;
-  if (!Array.isArray(allowed) || allowed.length === 0 || allowed.length > MAX_RETURN_PATHS) {
+  if (!isDenseArray(allowed) || allowed.length === 0 || allowed.length > MAX_RETURN_PATHS) {
     add('allowedReturnPaths', ruleFor(allowed, 'type'));
   } else {
     allowed.forEach((path, index) => {
@@ -66,7 +75,7 @@ export function validateClientConfig(config) {
   const providers = config.providers;
   if (!isPlainObject(providers)) add('providers', ruleFor(providers, 'not_object'));
   else {
-    for (const key of extraKeys(providers, ['email', 'google'])) add(`providers.${fieldName(key)}`, 'unknown_field');
+    for (const position of extraKeyPositions(providers, ['email', 'google'])) add(memberPath('providers', position), 'unknown_field');
     for (const key of ['email', 'google']) {
       if (typeof providers[key] !== 'boolean') add(`providers.${key}`, ruleFor(providers[key], 'type'));
     }
@@ -97,10 +106,6 @@ export function validateClientConfig(config) {
 
 function ruleFor(value, rule) {
   return value === undefined ? 'required' : rule;
-}
-
-function fieldName(key) {
-  return FIELD_PATTERN.test(key) ? key : '<invalid-key>';
 }
 
 // https origins only; plain http is accepted for loopback hosts so a local
@@ -158,17 +163,24 @@ function readRoutes(value, add) {
     add('routes', 'not_object');
     return null;
   }
-  for (const key of extraKeys(input, ['prefix', ...ROUTE_NAMES])) add(`routes.${fieldName(key)}`, 'unknown_field');
-  const prefix = input.prefix === undefined ? DEFAULT_PREFIX : input.prefix;
-  if (!isSafeConfiguredPath(prefix) || prefix === '/' || prefix.endsWith('/')) add('routes.prefix', 'unsafe_path');
+  for (const position of extraKeyPositions(input, ['prefix', ...ROUTE_NAMES])) add(memberPath('routes', position), 'unknown_field');
+  const prefix = own(input, 'prefix') === undefined ? DEFAULT_PREFIX : own(input, 'prefix');
+  const prefixOk = isSafeConfiguredPath(prefix) && prefix !== '/' && !prefix.endsWith('/');
+  if (!prefixOk) add('routes.prefix', 'unsafe_path');
   const out = { prefix };
   const seen = new Set();
   for (const name of ROUTE_NAMES) {
-    const segment = input[name] === undefined ? DEFAULT_ROUTES[name] : input[name];
-    if (typeof segment !== 'string' || !ROUTE_SEGMENT_PATTERN.test(segment)) add(`routes.${name}`, 'segment_syntax');
-    else if (seen.has(segment)) add(`routes.${name}`, 'duplicate');
+    const segment = own(input, name) === undefined ? DEFAULT_ROUTES[name] : own(input, name);
+    // Paths are built only from parts already known to be safe strings: a
+    // malformed part (null, an array, an object with its own toString) is
+    // reported, never interpolated or otherwise converted.
+    if (typeof segment !== 'string' || !ROUTE_SEGMENT_PATTERN.test(segment)) {
+      add(`routes.${name}`, 'segment_syntax');
+      continue;
+    }
+    if (seen.has(segment)) add(`routes.${name}`, 'duplicate');
     seen.add(segment);
-    out[name] = `${prefix}/${segment}`;
+    if (prefixOk) out[name] = `${prefix}/${segment}`;
   }
   return out;
 }
@@ -179,7 +191,7 @@ function readSession(value, add) {
     add('session', 'not_object');
     return null;
   }
-  for (const key of extraKeys(value, ['accessTokenMinutes'])) add(`session.${fieldName(key)}`, 'unknown_field');
+  for (const position of extraKeyPositions(value, ['accessTokenMinutes'])) add(memberPath('session', position), 'unknown_field');
   const minutes = value.accessTokenMinutes === undefined ? 30 : value.accessTokenMinutes;
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) add('session.accessTokenMinutes', 'out_of_range');
   return { accessTokenMinutes: minutes };
@@ -191,7 +203,7 @@ function readBrand(value, add) {
     add('brand', 'not_object');
     return null;
   }
-  for (const key of extraKeys(value, ['name', 'logoUrl', 'colors', 'fontStack'])) add(`brand.${fieldName(key)}`, 'unknown_field');
+  for (const position of extraKeyPositions(value, ['name', 'logoUrl', 'colors', 'fontStack'])) add(memberPath('brand', position), 'unknown_field');
   if (typeof value.name !== 'string' || value.name.length === 0 || value.name.length > 128) add('brand.name', ruleFor(value.name, 'type'));
   if (value.logoUrl !== undefined && !isSafeAsset(value.logoUrl)) add('brand.logoUrl', 'unsafe_url');
   if (value.fontStack !== undefined && (typeof value.fontStack !== 'string' || !FONT_STACK_PATTERN.test(value.fontStack))) {
@@ -200,10 +212,11 @@ function readBrand(value, add) {
   const colors = value.colors === undefined ? {} : value.colors;
   if (!isPlainObject(colors)) add('brand.colors', 'not_object');
   else {
-    for (const key of Object.keys(colors)) {
-      if (!FIELD_PATTERN.test(key)) add('brand.colors.<invalid-key>', 'key_syntax');
-      else if (typeof colors[key] !== 'string' || !HEX_COLOR_PATTERN.test(colors[key])) add(`brand.colors.${key}`, 'not_hex_color');
-    }
+    sortedKeys(colors).forEach((key, position) => {
+      const path = memberPath('brand.colors', position);
+      if (!FIELD_PATTERN.test(key)) add(path, 'key_syntax');
+      else if (typeof colors[key] !== 'string' || !HEX_COLOR_PATTERN.test(colors[key])) add(path, 'not_hex_color');
+    });
   }
   const out = { name: value.name, colors: isPlainObject(colors) ? { ...colors } : {} };
   if (value.logoUrl !== undefined) out.logoUrl = value.logoUrl;
@@ -229,14 +242,15 @@ function readCopy(value, add) {
     add('copy', 'not_object');
     return null;
   }
-  const keys = Object.keys(value);
+  const keys = sortedKeys(value);
   if (keys.length > MAX_COPY_ENTRIES) {
     add('copy', 'too_many');
     return null;
   }
-  for (const key of keys) {
-    if (!COPY_KEY_PATTERN.test(key)) add('copy.<invalid-key>', 'key_syntax');
-    else if (typeof value[key] !== 'string' || value[key].length > 2000) add(`copy.${key}`, 'type');
-  }
+  keys.forEach((key, position) => {
+    const path = memberPath('copy', position);
+    if (!COPY_KEY_PATTERN.test(key)) add(path, 'key_syntax');
+    else if (typeof value[key] !== 'string' || value[key].length > 2000) add(path, 'type');
+  });
   return { ...value };
 }
