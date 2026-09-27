@@ -71,6 +71,14 @@ test('open-redirect and injection attempts fall back to the default (L11)', () =
   }
 });
 
+test('an encoded slash or backslash anywhere, including the query, falls back', () => {
+  for (const next of ['/orders?x=%2f', '/orders?x=%2F', '/orders?x=%5c', '/orders?x=%5C', '/orders?next=%2F%2Fevil.example']) {
+    assert.equal(resolveReturnPath(next, config), DEFAULT, next);
+  }
+  // A query without encoded separators still resolves to the allowed pathname.
+  assert.equal(resolveReturnPath('/orders?x=%41', config), '/orders');
+});
+
 test('non-string input falls back to the default', () => {
   for (const next of [undefined, null, 0, ['/orders'], { toString: () => '/orders' }, true]) {
     assert.equal(resolveReturnPath(next, config), DEFAULT);
