@@ -4,7 +4,7 @@
 // by UTF-16 code unit, arrays in their given order, strings and finite numbers
 // encoded as JSON.stringify encodes them, no whitespace.
 
-import { isPlainObject, compareCodeUnits } from './shape.js';
+import { isPlainObject, isOpaqueKey, compareCodeUnits } from './shape.js';
 
 const MAX_DEPTH = 64;
 
@@ -69,7 +69,8 @@ export async function sha256Hex(text) {
 /**
  * Fingerprint of a request-bearing command: sha256 of the canonical JSON of
  * {operation, client_id, actor_id, payload}. `payload` is the command's
- * arguments without the request id. `clientId` is null only for project-wide
+ * arguments without the request id. `clientId` is an opaque client id (the
+ * same rule as the model; '' is a literal id) or null, only for project-wide
  * operations.
  * @param {{ operation: string, clientId: string | null, actorId: string, payload: unknown }} input
  * @returns {Promise<string>}
@@ -80,8 +81,8 @@ export async function requestFingerprint(input) {
   if (typeof operation !== 'string' || operation === '') {
     throw new TypeError('requestFingerprint: operation must be a non-empty string.');
   }
-  if (clientId !== null && (typeof clientId !== 'string' || clientId === '')) {
-    throw new TypeError('requestFingerprint: clientId must be a non-empty string or null.');
+  if (clientId !== null && !isOpaqueKey(clientId)) {
+    throw new TypeError('requestFingerprint: clientId must be an opaque key string or null.');
   }
   if (typeof actorId !== 'string' || actorId === '') {
     throw new TypeError('requestFingerprint: actorId must be a non-empty string.');

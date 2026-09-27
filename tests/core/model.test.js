@@ -78,12 +78,20 @@ test('undeclared keys, unknown fields and invalid keys are refused', () => {
   dup.roles.boss.permissions.push('team:manage');
   assert.deepEqual(issuesOf(() => validateModel(dup)), ['roles.#0.permissions[2]:duplicate']);
 
-  // Keys are opaque; only an empty key, NUL or an unpaired surrogate is invalid.
+  // Keys are opaque; only a non-string, NUL or an unpaired surrogate is invalid.
   const invalid = base();
-  invalid.roles[''] = { permissions: [] };
+  invalid.roles['r\u0000'] = { permissions: [] };
   invalid.permissions['\ud800'] = 'x';
-  invalid.roles.helper.permissions.push('a\u0000b');
-  assert.deepEqual(issuesOf(() => validateModel(invalid)).sort(), ['permissions.#3:invalid_key', 'roles.#0:invalid_key', 'roles.#2.permissions[1]:invalid_key']);
+  invalid.roles.helper.permissions.push('a\u0000b', 7);
+  assert.deepEqual(issuesOf(() => validateModel(invalid)).sort(), [
+    'permissions.#3:invalid_key',
+    'roles.#1.permissions[1]:invalid_key',
+    'roles.#1.permissions[2]:invalid_key',
+    'roles.#2:invalid_key',
+  ]);
+  for (const bad of [5, null, 'a\u0000b', '\udc00']) {
+    assert.deepEqual(issuesOf(() => validateModel({ ...base(), client: bad })), ['client:invalid_key']);
+  }
 
   assert.deepEqual(issuesOf(() => validateModel({ ...base(), client: 'other' }, { clientId: 'shop' })), ['client:client_mismatch']);
   assert.deepEqual(issuesOf(() => validateModel([])), ['$:not_object']);
@@ -325,4 +333,63 @@ test('permission and role keys are opaque: declared and mapped is the only rule'
   const undeclared = structuredClone(model);
   undeclared.roles['Role.With/Slash'].permissions = ['invoice/write'];
   assert.deepEqual(issuesOf(() => validateModel(undeclared)), ['roles.#0.permissions[0]:undeclared_permission']);
+});
+
+// The empty string is a literal key: declared and mapped like any other, never
+// a wildcard, a default or an absent value.
+
+test('an explicitly declared and mapped empty permission is canonical and hashed', async () => {
+  const model = base();
+  model.permissions[''] = 'explicit';
+  model.roles.helper.permissions.push('');
+  const m = validateModel(model);
+  assert.equal(m.permissions[''], 'explicit');
+  assert.deepEqual(m.roles.helper.permissions, ['', 'items:read:any']);
+  const text = canonicalModelJson(model);
+  assert.ok(text.includes('"permissions":{"":"explicit","items:read:any":"read all"'));
+  assert.deepEqual(JSON.parse(text).roles.helper.permissions, ['', 'items:read:any']);
+  const declaredOnly = base();
+  declaredOnly.permissions[''] = 'explicit';
+  const hashes = new Set([await modelHash(base()), await modelHash(declaredOnly), await modelHash(model)]);
+  assert.equal(hashes.size, 3);
+
+  const plan = planModelChange(declaredOnly, model, { state: 'live', holders: { boss: [U1], helper: [U2] } });
+  assert.deepEqual(plan.diff, [{ kind: 'mapping_added', role: 'helper', permission: '', reach: { holders: 1 } }]);
+  assert.deepEqual(plan.refusals, []);
+
+  // Mapping it without declaring it, or twice, is refused like any other key.
+  const undeclared = base();
+  undeclared.roles.helper.permissions.push('');
+  assert.deepEqual(issuesOf(() => validateModel(undeclared)), ['roles.#1.permissions[1]:undeclared_permission']);
+  const twice = structuredClone(model);
+  twice.roles.helper.permissions.push('');
+  assert.deepEqual(issuesOf(() => validateModel(twice)), ['roles.#1.permissions[2]:duplicate']);
+});
+
+test('an empty client id and an empty role key are literal keys in the model and planner', () => {
+  const current = { ...base(), client: '' };
+  const model = { ...base(), client: '' };
+  model.roles[''] = { permissions: ['items:read:own'] };
+  const m = validateModel(model, { clientId: '' });
+  assert.equal(m.client, '');
+  assert.deepEqual(m.roles[''].permissions, ['items:read:own']);
+  assert.deepEqual(issuesOf(() => validateModel(model, { clientId: 'shop' })), ['client:client_mismatch']);
+  assert.deepEqual(issuesOf(() => validateModel(base(), { clientId: '' })), ['client:client_mismatch']);
+  assert.deepEqual(issuesOf(() => planModelChange(current, base(), { state: 'live' })), ['next.client:client_mismatch']);
+
+  const added = planModelChange(current, model, { state: 'live', holders: { boss: [U1] } });
+  assert.deepEqual(added.diff, [
+    { kind: 'role_added', role: '' },
+    { kind: 'mapping_added', role: '', permission: 'items:read:own', reach: { holders: 0 } },
+  ]);
+  assert.deepEqual(added.refusals, []);
+  const held = planModelChange(model, current, { state: 'live', holders: { boss: [U1], '': [U2] } });
+  assert.deepEqual(held.refusals, [{ rule: 'role_held', role: '', holders: [U2] }]);
+  const promoted = structuredClone(model);
+  promoted.roles[''].manages_members = true;
+  assert.deepEqual(planModelChange(model, promoted, { state: 'live', holders: { boss: [U1], '': [U2] } }).refusals, [
+    { rule: 'promotes_holders', role: '', holders: [U2] },
+  ]);
+  // A holder list for an empty role the current model lacks is inconsistent.
+  assert.deepEqual(issuesOf(() => planModelChange(current, current, { state: 'live', holders: { '': [U1] } })), ['context.holders.#0:unknown_role']);
 });

@@ -13,12 +13,13 @@ export function isPlainObject(value) {
 
 /**
  * Client ids, role keys and permission keys are opaque client-defined strings
- * (contract 4); naming conventions are recommendations only. A key must be
- * non-empty and storable in the text and jsonb columns that hold the same keys
- * (4.2), so it may not contain NUL or an unpaired surrogate.
+ * (contract 4); naming conventions are recommendations only. The empty string
+ * is a literal key like any other, never a wildcard or an absent value. A key
+ * must be storable in the text and jsonb columns that hold the same keys (4.2),
+ * so it may not contain NUL or an unpaired surrogate.
  */
 export function isOpaqueKey(value) {
-  return typeof value === 'string' && value !== '' && !value.includes('\u0000') && value.isWellFormed();
+  return typeof value === 'string' && !value.includes('\u0000') && value.isWellFormed();
 }
 
 /** An array whose every index below `length` is an own property: no holes. */

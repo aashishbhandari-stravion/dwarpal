@@ -66,7 +66,29 @@ test('project-wide fingerprint uses a null client and the operator actor', async
 
 test('request fingerprint rejects malformed input', async () => {
   const ok = { operation: 'x', clientId: 'c', actorId: 'a', payload: {} };
-  for (const bad of [null, { ...ok, operation: '' }, { ...ok, clientId: '' }, { ...ok, clientId: 1 }, { ...ok, actorId: undefined }, { ...ok, payload: undefined }, { ...ok, payload: { n: Number.NaN } }]) {
-    await assert.rejects(requestFingerprint(bad), TypeError);
+  const bad = [
+    null,
+    { ...ok, operation: '' },
+    { ...ok, clientId: 1 },
+    { ...ok, clientId: undefined },
+    { ...ok, clientId: 'c\u0000' },
+    { ...ok, clientId: '\ud800' },
+    { ...ok, actorId: undefined },
+    { ...ok, actorId: '' },
+    { ...ok, payload: undefined },
+    { ...ok, payload: { n: Number.NaN } },
+  ];
+  for (const input of bad) {
+    await assert.rejects(requestFingerprint(input), TypeError);
   }
+});
+
+test('request fingerprint: an empty client id is a literal id, distinct from null and other ids', async () => {
+  const input = (clientId) => ({ operation: 'role_grant', clientId, actorId: 'a', payload: { x: 1 } });
+  const empty = await requestFingerprint(input(''));
+  const text = '{"actor_id":"a","client_id":"","operation":"role_grant","payload":{"x":1}}';
+  assert.equal(empty, createHash('sha256').update(text).digest('hex'));
+  assert.notEqual(empty, await requestFingerprint(input(null)));
+  assert.notEqual(empty, await requestFingerprint(input('shop')));
+  assert.notEqual(empty, await requestFingerprint(input(' ')));
 });

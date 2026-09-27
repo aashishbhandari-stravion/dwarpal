@@ -76,7 +76,7 @@ test('canAll / canAny: matrices, empty and malformed lists fail closed', () => {
   assert.equal(canAll(P.clerkAal2, ['records:read:any', 'people:manage']), false);
   assert.equal(canAny(P.clerkAal1, ['records:read:any', 'people:manage']), false);
   assert.equal(canAny(P.patronClerkAal1, ['records:read:any', 'records:read:own']), true);
-  for (const bad of [[], null, undefined, 'records:read:own', [''], [1], ['records:read:own', null]]) {
+  for (const bad of [[], null, undefined, 'records:read:own', [1], ['records:read:own', null], ['a\u0000b']]) {
     assert.equal(canAll(P.patron, bad), false);
     assert.equal(canAny(P.patron, bad), false);
   }
@@ -231,12 +231,45 @@ test('a hand-built principal with sparse access or provenance fails closed', () 
 
 test('evaluation uses the same opaque-key rule as the model', () => {
   const q = structuredClone(P.patron);
-  q.access.permissions.push('invoice/read', 'façade:lire');
+  q.access.permissions.push('invoice/read', 'façade:lire', '');
   assert.equal(can(q, 'invoice/read'), true);
-  assert.equal(canAll(q, ['invoice/read', 'façade:lire']), true);
-  for (const bad of ['', 'a\u0000b', '\ud800']) {
+  assert.equal(canAll(q, ['invoice/read', 'façade:lire', '']), true);
+  for (const bad of ['a\u0000b', '\ud800', 7]) {
     q.access.permissions.push(bad);
     assert.equal(can(q, bad), false, JSON.stringify(bad));
     assert.equal(canAny(q, [bad]), false, JSON.stringify(bad));
   }
+});
+
+test('the empty string is a literal key: granted only when held, never a wildcard', () => {
+  const q = structuredClone(P.patron);
+  q.access.permissions.unshift('');
+  q.memberships[0].permissions.unshift('');
+  assert.equal(can(q, ''), true);
+  assert.equal(canAll(q, ['']), true);
+  assert.equal(canAny(q, ['']), true);
+  assert.equal(canAll(q, ['', 'records:read:own']), true);
+  assert.equal(canAll(q, ['', 'people:manage']), false);
+  assert.equal(can(q, 'people:manage'), false);
+  assert.deepEqual(explain(q, ''), { allowed: true, via: ['patron'], withheld: [] });
+  assert.equal(requirePermission(q, ''), q);
+  // An empty required list still denies, even for a holder of ''.
+  assert.equal(canAll(q, []), false);
+  assert.equal(canAny(q, []), false);
+
+  // Not held, or no principal: denied.
+  assert.equal(canAll(P.patron, ['']), false);
+  assert.equal(canAny(P.patron, ['']), false);
+  assert.deepEqual(explain(P.patron, ''), { allowed: false, via: [], withheld: [] });
+  assert.throws(() => requirePermission(P.patron, ''), code('forbidden'));
+  assert.equal(can(null, ''), false);
+  assert.throws(() => requirePermission(null, ''), code('no_token'));
+
+  const r = structuredClone(P.patron);
+  r.access.roles.unshift('');
+  r.access.activeRoles.unshift('');
+  assert.equal(requireRole(r, ''), r);
+  assert.equal(requireRole(r, ['']), r);
+  assert.throws(() => requireRole(r, []), code('forbidden'));
+  assert.throws(() => requireRole(P.patron, ['']), code('forbidden'));
 });

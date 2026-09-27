@@ -146,9 +146,12 @@ test('malformed route parts give config_invalid, never a native error', () => {
 
 test('client ids are opaque; return-path lists must be dense', () => {
   assert.equal(validateClientConfig(validConfig({ clientId: 'shop/eu 1' })).clientId, 'shop/eu 1');
-  for (const bad of ['', 'a\u0000b', '\ud800', 5]) {
+  // The empty string is a literal client id.
+  assert.equal(validateClientConfig(validConfig({ clientId: '' })).clientId, '');
+  for (const bad of ['a\u0000b', '\ud800', 5, null]) {
     assert.deepEqual(issuesOf(validConfig({ clientId: bad })), ['clientId:invalid_key']);
   }
+  assert.deepEqual(issuesOf(validConfig({ clientId: undefined })), ['clientId:required']);
   const holes = ['/'];
   holes.length = 2;
   assert.deepEqual(issuesOf(validConfig({ allowedReturnPaths: holes })), ['allowedReturnPaths:type']);

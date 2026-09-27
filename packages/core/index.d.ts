@@ -4,7 +4,8 @@ export declare const AUTH_CONTRACT_VERSION: '0.5';
 
 /**
  * Role keys, permission keys and client ids are opaque client-defined strings.
- * Any non-empty string without NUL or an unpaired surrogate is valid; the
+ * Any string without NUL or an unpaired surrogate is valid, including the empty
+ * string, which is a literal key and never a wildcard or an absent value. The
  * `resource:action[:scope]` form for permission keys is a recommendation.
  */
 export type RoleKey = string;
@@ -281,6 +282,7 @@ export declare function resolveReturnPath(
 
 export declare function canonicalJson(value: unknown): string;
 export declare function sha256Hex(text: string): Promise<string>;
+/** `clientId` follows the opaque-key rule of RoleKey; null only for project-wide operations. */
 export declare function requestFingerprint(input: {
   operation: string;
   clientId: string | null;

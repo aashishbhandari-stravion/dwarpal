@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AuthError, createPrincipal } from '@briqvent/dwarpal';
+import { AuthError, createPrincipal, can, explain, requirePermission } from '@briqvent/dwarpal';
 import { FIXTURE_CLIENT_ID, FIXTURE_OTHER_CLIENT_ID } from '@briqvent/dwarpal/testing';
 
 const unavailable = (err) => err instanceof AuthError && err.code === 'unavailable';
@@ -74,7 +74,8 @@ test('invalid external shapes and booleans fail closed with unavailable', () => 
   const cases = {
     notObject: null,
     extraTopLevel: { ...snapshot(), cached: true },
-    emptyClient: snapshot({ clientId: '' }),
+    numberClient: snapshot({ clientId: 5 }),
+    nulClient: snapshot({ clientId: 'b\u0000', memberships: [row({ clientId: 'b\u0000' })] }),
     badEnrolled: snapshot({ enrolledAt: 'yesterday' }),
     badUser: snapshot({ identity: { userId: 'not-a-uuid', verifiedEmail: null, providers: [] } }),
     badProvider: snapshot({ identity: { userId: USER, verifiedEmail: null, providers: ['github'] } }),
@@ -88,10 +89,11 @@ test('invalid external shapes and booleans fail closed with unavailable', () => 
     missingFlag: snapshot({ memberships: [row({ flags: { selfAssignable: true, managesMembers: false } })] }),
     extraFlag: snapshot({ memberships: [row({ flags: { selfAssignable: true, managesMembers: false, mfaRequired: false, superuser: true } })] }),
     missingPermissions: snapshot({ memberships: [row({ permissions: undefined })] }),
-    emptyPermission: snapshot({ memberships: [row({ permissions: [''] })] }),
+    numberPermission: snapshot({ memberships: [row({ permissions: [7] })] }),
     nulPermission: snapshot({ memberships: [row({ permissions: ['a\u0000b'] })] }),
     surrogatePermission: snapshot({ memberships: [row({ permissions: ['\udc00'] })] }),
-    emptyRole: snapshot({ memberships: [row({ roleKey: '' })] }),
+    missingRole: snapshot({ memberships: [row({ roleKey: undefined })] }),
+    surrogateRole: snapshot({ memberships: [row({ roleKey: '\ud800' })] }),
     badVia: snapshot({ memberships: [row({ grantedVia: 'self' })] }),
     dupRole: snapshot({ memberships: [row(), row()] }),
     membershipsNotArray: snapshot({ memberships: {} }),
@@ -127,4 +129,39 @@ test('snapshot keys are opaque like model keys', () => {
   }));
   assert.deepEqual(p.access.roles, ['constructor']);
   assert.deepEqual(p.access.permissions, ['façade:lire', 'invoice/read']);
+});
+
+test('empty client, role and permission keys are literal keys in a scoped snapshot', () => {
+  const p = createPrincipal(snapshot({ clientId: '', memberships: [row({ clientId: '', roleKey: '', permissions: ['items:read:own', ''] })] }));
+  assert.equal(p.access.clientId, '');
+  assert.deepEqual(p.access.roles, ['']);
+  assert.deepEqual(p.access.activeRoles, ['']);
+  assert.deepEqual(p.access.permissions, ['', 'items:read:own']);
+  assert.equal(can(p, ''), true);
+  // Exact client equality: '' is neither a wildcard nor a match for another id.
+  assert.throws(() => createPrincipal(snapshot({ memberships: [row({ clientId: '' })] })), unavailable);
+  assert.throws(() => createPrincipal(snapshot({ clientId: '' })), unavailable);
+});
+
+test('an empty permission follows activation: withheld at aal1, granted at aal2, denied when absent', () => {
+  const mfaRow = row({ roleKey: 'desk', flags: { selfAssignable: false, managesMembers: false, mfaRequired: true }, grantedVia: 'manager', permissions: [''] });
+  const mfaCode = (err) => err instanceof AuthError && err.code === 'mfa_required';
+  const forbidden = (err) => err instanceof AuthError && err.code === 'forbidden';
+
+  const aal1 = createPrincipal(snapshot({ memberships: [row(), mfaRow] }));
+  assert.deepEqual(aal1.access.permissions, ['items:read:own']);
+  assert.equal(aal1.access.mfaPending, true);
+  assert.equal(can(aal1, ''), false);
+  assert.deepEqual(explain(aal1, ''), { allowed: false, via: [], withheld: [{ role: 'desk', reason: 'mfa_required' }] });
+  assert.throws(() => requirePermission(aal1, ''), mfaCode);
+
+  const aal2 = createPrincipal(snapshot({ session: { id: 'session-1', aal: 'aal2', issuedAt: T, expiresAt: T, checkedAt: T }, memberships: [row(), mfaRow] }));
+  assert.deepEqual(aal2.access.permissions, ['', 'items:read:own']);
+  assert.deepEqual(explain(aal2, ''), { allowed: true, via: ['desk'], withheld: [] });
+  assert.equal(requirePermission(aal2, ''), aal2);
+
+  const absent = createPrincipal(snapshot());
+  assert.equal(can(absent, ''), false);
+  assert.deepEqual(explain(absent, ''), { allowed: false, via: [], withheld: [] });
+  assert.throws(() => requirePermission(absent, ''), forbidden);
 });
