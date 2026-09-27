@@ -20,6 +20,8 @@ Dwarpal requires **Supabase, Free plan or above**, and Node 22 or later for the 
 - [Design](docs/design.md): contract 0.5, the `Principal` shape, the server and SQL surfaces, security decisions and the test plan.
 - [RBAC low-level design](docs/rbac-lld.md): the data model, invariants, sequence diagrams and failure modes.
 
+PDF editions for offline reading: [manual](docs/pdf/manual.pdf), [design](docs/pdf/design.pdf), [RBAC low-level design](docs/pdf/rbac-lld.pdf). The Markdown files are the source; the PDFs are generated from them.
+
 ## Licence
 
 [MIT](LICENSE)

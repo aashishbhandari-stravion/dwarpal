@@ -313,7 +313,7 @@ sequenceDiagram
     DB-->>CLI: grant assertions pass
     Op->>CLI: auth-kit doctor
     CLI->>DB: catalog grant inspection with has_*_privilege (default mode)
-    DB-->>CLI: grant table matches; PUBLIC has no EXECUTE
+    DB-->>CLI: grant table matches, PUBLIC has no EXECUTE
     opt doctor --probe --probe-email disposable@example.test
         CLI->>Auth: sign in the disposable user (publishable key)
         CLI->>DB: real calls as authenticated and as anon
@@ -332,7 +332,7 @@ sequenceDiagram
         CLI-->>Op: setup_pending: user must accept the invitation, then rerun with the returned id
     else user confirmed
         CLI->>DB: bootstrap_manager(user_id, 'acme', 'supervisor', request_id)
-        Note over DB: lock; request_log check; role has manages_members;<br/>sets clients.state = live; request_log row always
+        Note over DB: lock, request_log check, role has manages_members,<br/>sets clients.state = live, request_log row always
         DB-->>CLI: granted (or already_member on retry)
     end
     CLI-->>Op: client ready, first manager set
@@ -367,7 +367,7 @@ sequenceDiagram
     participant App as Brand web application
 
     Op->>Dash: new Supabase project (default: one project per website)
-    Op->>Dash: enable Google, SMTP, TOTP; add exact redirect URLs
+    Op->>Dash: enable Google, SMTP, TOTP, add exact redirect URLs
     Op->>CLI: auth-kit init (writes a ClientConfig skeleton)
     Op->>CLI: auth-kit migrate, doctor
     Op->>CLI: auth-kit register-client --client studio
@@ -400,16 +400,16 @@ sequenceDiagram
     B->>P: effective_access('acme')
     alt enrolled_at is null
         B->>P: join_client('acme')
-        Note over P: lock; unknown_client? already_enrolled? closed?<br/>no_default_role? else insert enrollment, grants, events
+        Note over P: lock, unknown_client? already_enrolled? closed?<br/>no_default_role? else insert enrollment, grants, events
         alt enrolled
-            P-->>B: enrolled (buyer); browser re-reads effective_access
+            P-->>B: enrolled (buyer), browser re-reads effective_access
         else unknown_client or no_default_role
-            P-->>B: setup_pending: operator setup not finished; retry button
+            P-->>B: setup_pending: operator setup not finished, retry button
         else closed
-            P-->>B: no_access: invite-only site; no retry loop
+            P-->>B: no_access: invite-only site, no retry loop
         end
     else already enrolled (memberships may or may not exist)
-        B->>B: no join call; render from effective_access
+        B->>B: no join call, render from effective_access
     end
     B->>B: replaceState strips code and token_hash
 ```
@@ -444,7 +444,7 @@ sequenceDiagram
             K-->>W: AuthError forbidden or mfa_required
             W-->>B: 403 with error code
         else granted
-            Note over W: ownership: order.userId === principal.identity.userId<br/>(or your audited link row); otherwise 404, empty body
+            Note over W: ownership: order.userId === principal.identity.userId<br/>(or your audited link row), otherwise 404, empty body
             W-->>B: 200
         end
     end
@@ -510,7 +510,7 @@ sequenceDiagram
     Op->>CLI: auth-kit apply-model --client acme auth-model.json --dry-run
     CLI->>DB: apply_model(..., dry_run)
     DB-->>CLI: diff: +permission documents:download:any, +mapping agent→documents:download:any (holders: 3)
-    Note over DB: a self_assignable change would be annotated future_joiners;<br/>on a live client the model must keep at least one assigned manager
+    Note over DB: a self_assignable change would be annotated future_joiners,<br/>on a live client the model must keep at least one assigned manager
     Op->>CLI: auth-kit apply-model --client acme auth-model.json
     CLI->>DB: apply_model(...)
     DB-->>CLI: applied, model_events row with diff and hash
