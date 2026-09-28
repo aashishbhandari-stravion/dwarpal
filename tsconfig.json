@@ -11,7 +11,11 @@
   "include": [
     "packages/core/**/*.d.ts",
     "packages/server/**/*.d.ts",
+    "packages/browser/**/*.d.ts",
+    "packages/emulator/**/*.d.ts",
     "tests/core/types/**/*.ts",
-    "tests/server/types/**/*.ts"
+    "tests/server/types/**/*.ts",
+    "tests/browser/types/**/*.ts",
+    "tests/emulator/types/**/*.ts"
   ]
 }

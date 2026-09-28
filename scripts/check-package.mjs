@@ -5,12 +5,14 @@
 // source and the packed copy, (4) the installed auth-kit executable runs and
 // reports that this package does not ship the SQL migrations, and (5) a
 // TypeScript consumer compiles against the packed declarations, including the
-// optional Hono entry with Hono installed beside it.
+// optional Hono entry with Hono installed beside it, and (6) the browser entry
+// imports with its pinned supabase-js and refuses a secret key.
 //
 // Usage: node scripts/check-package.mjs [--work-dir <empty dir>] [--keep]
 // Without --work-dir a fresh temporary directory is used and removed at the end.
-// Installs are --offline: jose and hono must already be in the npm cache (a
-// normal `npm ci` in this repository puts them there).
+// Installs are --offline: jose, hono and supabase-js with its dependencies
+// must already be in the npm cache (a normal `npm ci` in this repository puts
+// them there).
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -31,14 +33,19 @@ const ENTRIES = {
   './server': 'packages/server/index',
   './server/operator': 'packages/server/operator',
   './server/hono': 'packages/server/hono',
+  './browser': 'packages/browser/index',
 };
-const ALLOWED_FILE = /^(package\.json|README\.md|LICENSE|packages\/core\/(testing\/)?[a-z-]+\.(js|d\.ts)|packages\/server\/(lib\/|cli\/)?[a-z-]+\.(js|d\.ts))$/;
+const ALLOWED_FILE = /^(package\.json|README\.md|LICENSE|packages\/core\/(testing\/)?[a-z-]+\.(js|d\.ts)|packages\/server\/(lib\/|cli\/)?[a-z-]+\.(js|d\.ts)|packages\/browser\/(lib\/)?[a-z-]+\.(js|d\.ts)|packages\/browser\/styles\.css)$/;
 const REQUIRED_FILES = [
   'package.json', 'LICENSE', 'README.md',
   ...Object.values(ENTRIES).flatMap((base) => [`${base}.js`, `${base}.d.ts`]),
   'packages/server/cli/auth-kit.js',
+  'packages/browser/styles.css',
 ];
-const PINNED = { jose: '6.2.12', hono: '4.13.9' };
+const PINNED = { jose: '6.2.12', hono: '4.13.9', supabase: '2.117.2' };
+// supabase-js 2.117.2 and what it installs; every one must carry a permissive licence.
+const BROWSER_RUNTIME = ['@supabase/auth-js', '@supabase/functions-js', '@supabase/phoenix', '@supabase/postgrest-js', '@supabase/realtime-js', '@supabase/storage-js', '@supabase/supabase-js', 'iceberg-js', 'tslib'];
+const PERMISSIVE = new Set(['MIT', '0BSD', 'Apache-2.0', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause']);
 
 function fail(message) {
   console.error(`check-package: FAIL ${message}`);
@@ -109,17 +116,30 @@ async function main() {
     const tarball = join(workDir, filename);
     const tarballSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
 
-    // 2. Install into a throwaway consumer; the only runtime dependency is jose.
+    // 2. Install into a throwaway consumer; runtime dependencies are jose and the pinned supabase-js.
     const consumer = join(workDir, 'consumer');
     await mkdir(consumer);
     await writeFile(join(consumer, 'package.json'), JSON.stringify({ name: 'pack-consumer', private: true, type: 'module' }));
     run('npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--offline', tarball], consumer);
     const installed = join(consumer, 'node_modules/@briqvent/dwarpal');
     const topLevel = (await readdir(join(consumer, 'node_modules'))).filter((n) => !n.startsWith('.')).sort();
-    sameList('installed packages (the optional hono peer must not be installed implicitly)', topLevel, ['@briqvent', 'jose']);
+    sameList('installed packages (the optional hono peer must not be installed implicitly)', topLevel, ['@briqvent', '@supabase', 'iceberg-js', 'jose', 'tslib']);
     const joseManifest = JSON.parse(await readFile(join(consumer, 'node_modules/jose/package.json'), 'utf8'));
     if (joseManifest.version !== PINNED.jose || joseManifest.license !== 'MIT') fail('jose is not the pinned MIT release');
     const joseBytes = await directorySize(join(consumer, 'node_modules/jose'));
+    const supabaseManifest = JSON.parse(await readFile(join(consumer, 'node_modules/@supabase/supabase-js/package.json'), 'utf8'));
+    if (supabaseManifest.version !== PINNED.supabase || supabaseManifest.license !== 'MIT') fail('supabase-js is not the pinned MIT release');
+    const scoped = (await readdir(join(consumer, 'node_modules/@supabase'))).map((n) => `@supabase/${n}`);
+    const browserRuntime = [...scoped, ...topLevel.filter((n) => !n.startsWith('@') && n !== 'jose')].sort();
+    sameList('browser runtime packages', browserRuntime, BROWSER_RUNTIME);
+    let browserBytes = 0;
+    const licences = [];
+    for (const name of browserRuntime) {
+      const manifest = JSON.parse(await readFile(join(consumer, 'node_modules', name, 'package.json'), 'utf8'));
+      if (!PERMISSIVE.has(manifest.license)) fail(`${name} licence ${manifest.license} is not on the permissive list`);
+      licences.push(`${name} ${manifest.version} (${manifest.license})`);
+      browserBytes += await directorySize(join(consumer, 'node_modules', name));
+    }
 
     // 3. Exports: source runtime == packed runtime == source declarations == packed declarations.
     //    The Hono entry imports no Hono at runtime; its declarations need Hono, installed here.
@@ -139,6 +159,7 @@ async function main() {
       "import { createAuthServer, requirePermission, AuthError } from '@briqvent/dwarpal/server';",
       "import { createOperatorClient, OperatorError } from '@briqvent/dwarpal/server/operator';",
       "import { honoMiddleware } from '@briqvent/dwarpal/server/hono';",
+      "import { createAuthController, BROWSER_STATES, mountAuthScreens } from '@briqvent/dwarpal/browser';",
       "if (AUTH_CONTRACT_VERSION !== '0.5') throw new Error('contract');",
       "if (!can(fixturePrincipals.patron, 'records:read:own')) throw new Error('own');",
       "if (can(fixturePrincipals.patronClerkAal1, 'records:read:any')) throw new Error('withheld');",
@@ -151,6 +172,12 @@ async function main() {
       "let operatorRefused = false; try { createOperatorClient({ supabaseUrl: 'https://p.supabase.co', secretKey: 'sb_publishable_x' }); } catch (e) { operatorRefused = e instanceof OperatorError; }",
       "if (!operatorRefused) throw new Error('a publishable key must be refused by the operator client');",
       "if (typeof honoMiddleware(auth) !== 'function') throw new Error('hono');",
+      "if (BROWSER_STATES.length !== 12 || typeof mountAuthScreens !== 'function') throw new Error('browser entry');",
+      "const env = { location: { href: 'https://s.test/account/sign-in' }, history: { replaceState() {} }, localStorage: null, sessionStorage: null, navigate() {} };",
+      "let browserRefused = false; try { createAuthController({ env, config: { clientId: 'c', supabaseUrl: 'https://p.supabase.co', publishableKey: 'sb_secret_x', origin: 'https://s.test', allowedReturnPaths: ['/'], defaultReturnPath: '/', providers: { email: true, google: false }, selfSignup: true } }); } catch (e) { browserRefused = e.code === 'config_invalid'; }",
+      "if (!browserRefused) throw new Error('a secret key must be refused by the browser controller');",
+      "const css = await import('node:fs').then((fs) => fs.readFileSync(new URL(import.meta.resolve('@briqvent/dwarpal/browser/styles.css')), 'utf8'));",
+      "if (!css.includes('.ak-root')) throw new Error('stylesheet entry');",
       "for (const deep of ['@briqvent/dwarpal/packages/core/model.js', '@briqvent/dwarpal/packages/server/lib/http.js']) {",
       "  let blocked = false; try { await import(deep); } catch { blocked = true; }",
       "  if (!blocked) throw new Error('deep import should be blocked by the exports map');",
@@ -181,6 +208,7 @@ async function main() {
     await mkdir(join(consumer, 'src'));
     await copyFile(join(root, 'tests/core/types/consumer.ts'), join(consumer, 'src/consumer.ts'));
     await copyFile(join(root, 'tests/server/types/consumer.ts'), join(consumer, 'src/server-consumer.ts'));
+    await copyFile(join(root, 'tests/browser/types/consumer.ts'), join(consumer, 'src/browser-consumer.ts'));
     await writeFile(join(consumer, 'tsconfig.json'), JSON.stringify({
       compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, types: [] },
       include: ['src/**/*.ts'],
@@ -191,9 +219,10 @@ async function main() {
     console.log(`check-package: tarball ${filename} sha256 ${tarballSha256}`);
     console.log(`check-package: ${names.length} files: ${names.join(', ')}`);
     console.log(`check-package: runtime dependency jose ${joseManifest.version} (${joseManifest.license}), ${joseBytes} bytes installed`);
+    console.log(`check-package: browser runtime ${licences.join(', ')}; ${browserBytes} bytes installed`);
     console.log(`check-package: ${probeOut}; exports and declarations agree for ${Object.keys(ENTRIES).length} entries`);
     console.log('check-package: auth-kit bin runs; packed migrate reports migration files missing (SQL delivery is not part of this package)');
-    console.log('check-package: packed TypeScript consumers compile (core, server, operator, hono)');
+    console.log('check-package: packed TypeScript consumers compile (core, server, operator, hono, browser)');
     console.log('check-package: OK');
   } finally {
     if (!keep && workIndex === -1) await rm(workDir, { recursive: true, force: true });
