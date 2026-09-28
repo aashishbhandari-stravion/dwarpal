@@ -66,38 +66,64 @@ alter default privileges in schema auth_kit_private revoke execute on functions 
 
 -- 2. Tables -------------------------------------------------------------------
 
+-- Client ids, role keys and permission keys are opaque text of any length, but
+-- a B-tree index entry is limited to about 2.7 kB. Each key column therefore
+-- has a stored SHA-256 digest beside it, and primary and foreign keys are
+-- built on the digests. The text stays the logical key: every lookup and join
+-- compares the text itself (a digest predicate only selects the index), a
+-- different key with an equal digest is refused rather than merged, and
+-- exact_key_reference below confirms every reference by its text.
+create function auth_kit_private.key_digest(p_key text)
+returns bytea
+language sql
+immutable strict parallel safe
+set search_path = ''
+as $$
+  select sha256(convert_to(p_key, 'UTF8'))
+$$;
+
 create table auth_kit_private.migrations (
   version text primary key,
   name text not null,
   applied_at timestamptz not null default pg_catalog.now()
 );
 
+-- Digest columns come last, so a positional insert of the logical columns
+-- still works; they are always derived, never written.
 create table auth_kit_private.clients (
-  client_id text primary key,
+  client_id text not null,
   display_name text not null,
   signup_policy text not null check (signup_policy in ('open', 'closed')),
   -- registered -> live on the first successful bootstrap_manager; never back.
   state text not null default 'registered' check (state in ('registered', 'live')),
-  created_at timestamptz not null default pg_catalog.now()
+  created_at timestamptz not null default pg_catalog.now(),
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  primary key (client_digest)
 );
 
 create table auth_kit_private.roles (
-  client_id text not null references auth_kit_private.clients (client_id) on delete restrict,
+  client_id text not null,
   role_key text not null,
   description text not null default '',
   self_assignable boolean not null default false,
   manages_members boolean not null default false,
   mfa_required boolean not null default false,
-  primary key (client_id, role_key),
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  role_digest bytea not null generated always as (auth_kit_private.key_digest(role_key)) stored,
+  primary key (client_digest, role_digest),
+  foreign key (client_digest) references auth_kit_private.clients (client_digest) on delete restrict,
   -- Public join grants self-assignable roles, so such a role must never manage members.
   constraint roles_self_assignable_not_manager check (not (self_assignable and manages_members))
 );
 
 create table auth_kit_private.permissions (
-  client_id text not null references auth_kit_private.clients (client_id) on delete restrict,
+  client_id text not null,
   permission_key text not null,
   description text not null default '',
-  primary key (client_id, permission_key)
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  permission_digest bytea not null generated always as (auth_kit_private.key_digest(permission_key)) stored,
+  primary key (client_digest, permission_digest),
+  foreign key (client_digest) references auth_kit_private.clients (client_digest) on delete restrict
 );
 
 -- Composite keys keep a mapping inside one client; restrict keeps a mapped
@@ -106,9 +132,12 @@ create table auth_kit_private.role_permissions (
   client_id text not null,
   role_key text not null,
   permission_key text not null,
-  primary key (client_id, role_key, permission_key),
-  foreign key (client_id, role_key) references auth_kit_private.roles (client_id, role_key) on delete restrict,
-  foreign key (client_id, permission_key) references auth_kit_private.permissions (client_id, permission_key) on delete restrict
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  role_digest bytea not null generated always as (auth_kit_private.key_digest(role_key)) stored,
+  permission_digest bytea not null generated always as (auth_kit_private.key_digest(permission_key)) stored,
+  primary key (client_digest, role_digest, permission_digest),
+  foreign key (client_digest, role_digest) references auth_kit_private.roles (client_digest, role_digest) on delete restrict,
+  foreign key (client_digest, permission_digest) references auth_kit_private.permissions (client_digest, permission_digest) on delete restrict
 );
 
 create table auth_kit_private.memberships (
@@ -118,9 +147,11 @@ create table auth_kit_private.memberships (
   granted_at timestamptz not null default pg_catalog.now(),
   granted_by uuid,
   granted_via text not null check (granted_via in ('join', 'manager', 'operator')),
-  primary key (user_id, client_id, role_key),
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  role_digest bytea not null generated always as (auth_kit_private.key_digest(role_key)) stored,
+  primary key (user_id, client_digest, role_digest),
   -- A held role cannot be deleted; revoke first.
-  foreign key (client_id, role_key) references auth_kit_private.roles (client_id, role_key) on delete restrict,
+  foreign key (client_digest, role_digest) references auth_kit_private.roles (client_digest, role_digest) on delete restrict,
   constraint memberships_granted_by_manager check ((granted_via = 'manager') = (granted_by is not null))
 );
 
@@ -128,10 +159,12 @@ create table auth_kit_private.memberships (
 -- happened. No function updates or deletes it, so a manager's revoke sticks.
 create table auth_kit_private.enrollments (
   user_id uuid not null,
-  client_id text not null references auth_kit_private.clients (client_id) on delete restrict,
+  client_id text not null,
   enrolled_at timestamptz not null default pg_catalog.now(),
   granted_roles text[] not null,
-  primary key (user_id, client_id)
+  client_digest bytea not null generated always as (auth_kit_private.key_digest(client_id)) stored,
+  primary key (user_id, client_digest),
+  foreign key (client_digest) references auth_kit_private.clients (client_digest) on delete restrict
 );
 
 create table auth_kit_private.membership_events (
@@ -208,6 +241,72 @@ create policy profiles_update_own on auth_kit.profiles
 
 create view auth_kit.public_clients as
   select client_id, display_name from auth_kit_private.clients;
+
+-- The foreign keys match digests. This trigger makes every reference exact:
+-- the referenced row must carry the same key text, and no key text may change
+-- while its digest stays the same. A digest collision can therefore never
+-- attach a row to a different key; it can only make a write fail.
+create function auth_kit_private.exact_key_reference()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_new jsonb;
+  v_old jsonb;
+  v_column text;
+  v_digest text;
+begin
+  if tg_op = 'UPDATE' then
+    v_new := to_jsonb(new);
+    v_old := to_jsonb(old);
+    foreach v_column in array array['client_id', 'role_key', 'permission_key'] loop
+      v_digest := split_part(v_column, '_', 1) || '_digest';
+      if v_new ? v_column and v_new -> v_column <> v_old -> v_column and v_new -> v_digest = v_old -> v_digest then
+        raise exception using errcode = '23503', message = 'auth_kit: a key changed but its digest did not',
+          detail = tg_table_name || '.' || v_column;
+      end if;
+    end loop;
+  end if;
+  if tg_table_name in ('roles', 'permissions', 'enrollments') then
+    if not exists (select 1 from auth_kit_private.clients c
+                    where c.client_digest = new.client_digest and c.client_id = new.client_id) then
+      raise exception using errcode = '23503', message = 'auth_kit: no client with exactly this client id',
+        detail = tg_table_name;
+    end if;
+  end if;
+  if tg_table_name in ('role_permissions', 'memberships') then
+    if not exists (select 1 from auth_kit_private.roles r
+                    where r.client_digest = new.client_digest and r.role_digest = new.role_digest
+                      and r.client_id = new.client_id and r.role_key = new.role_key) then
+      raise exception using errcode = '23503', message = 'auth_kit: no role with exactly this client id and role key',
+        detail = tg_table_name;
+    end if;
+  end if;
+  if tg_table_name = 'role_permissions' then
+    if not exists (select 1 from auth_kit_private.permissions p
+                    where p.client_digest = new.client_digest and p.permission_digest = new.permission_digest
+                      and p.client_id = new.client_id and p.permission_key = new.permission_key) then
+      raise exception using errcode = '23503', message = 'auth_kit: no permission with exactly this client id and permission key',
+        detail = tg_table_name;
+    end if;
+  end if;
+  return null;
+end
+$$;
+
+create trigger exact_key_reference after update of client_id on auth_kit_private.clients
+  for each row execute function auth_kit_private.exact_key_reference();
+create trigger exact_key_reference after insert or update of client_id, role_key on auth_kit_private.roles
+  for each row execute function auth_kit_private.exact_key_reference();
+create trigger exact_key_reference after insert or update of client_id, permission_key on auth_kit_private.permissions
+  for each row execute function auth_kit_private.exact_key_reference();
+create trigger exact_key_reference after insert or update of client_id, role_key, permission_key on auth_kit_private.role_permissions
+  for each row execute function auth_kit_private.exact_key_reference();
+create trigger exact_key_reference after insert or update of client_id, role_key on auth_kit_private.memberships
+  for each row execute function auth_kit_private.exact_key_reference();
+create trigger exact_key_reference after insert or update of client_id on auth_kit_private.enrollments
+  for each row execute function auth_kit_private.exact_key_reference();
 
 -- 3. Internal helpers (security invoker; they run as the definer when called
 --    from an implementation) -------------------------------------------------
@@ -563,8 +662,10 @@ begin
   select bool_or(auth_kit_private.role_active(r.mfa_required)), count(*)
     into v_active, v_held
     from auth_kit_private.memberships m
-    join auth_kit_private.roles r on r.client_id = m.client_id and r.role_key = m.role_key
-   where m.user_id = p_user_id and m.client_id = p_client_id and r.manages_members;
+    join auth_kit_private.roles r on r.client_digest = m.client_digest and r.role_digest = m.role_digest
+                                 and r.client_id = m.client_id and r.role_key = m.role_key
+   where m.user_id = p_user_id and m.client_digest = auth_kit_private.key_digest(p_client_id)
+     and m.client_id = p_client_id and r.manages_members;
   if v_held = 0 then
     perform auth_kit_private.refuse('forbidden');
   elsif not v_active then
@@ -587,6 +688,28 @@ begin
   elsif v_confirmed is null then
     perform auth_kit_private.refuse('email_unverified');
   end if;
+end
+$$;
+
+-- Inserts a membership unless exactly this one exists; true when inserted.
+-- A plain insert, not ON CONFLICT on the digest key: a different key with an
+-- equal digest must fail, never read as already_member.
+create function auth_kit_private.insert_membership(p_user_id uuid, p_client_id text, p_role_key text,
+                                                   p_granted_by uuid, p_granted_via text)
+returns boolean
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if exists (select 1 from auth_kit_private.memberships m
+              where m.user_id = p_user_id
+                and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.role_digest = auth_kit_private.key_digest(p_role_key)
+                and m.client_id = p_client_id and m.role_key = p_role_key) then
+    return false;
+  end if;
+  insert into auth_kit_private.memberships (user_id, client_id, role_key, granted_at, granted_by, granted_via)
+  values (p_user_id, p_client_id, p_role_key, now(), p_granted_by, p_granted_via);
+  return true;
 end
 $$;
 
@@ -763,14 +886,17 @@ stable
 set search_path = ''
 as $$
   select case
-    when not exists (select 1 from auth_kit_private.roles where client_id = p_client_id)
-     and not exists (select 1 from auth_kit_private.permissions where client_id = p_client_id)
+    when not exists (select 1 from auth_kit_private.roles r
+                      where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.client_id = p_client_id)
+     and not exists (select 1 from auth_kit_private.permissions p
+                      where p.client_digest = auth_kit_private.key_digest(p_client_id) and p.client_id = p_client_id)
     then null
     else jsonb_build_object(
       'client', to_jsonb(p_client_id),
       'permissions', coalesce((
         select jsonb_object_agg(p.permission_key, p.description)
-          from auth_kit_private.permissions p where p.client_id = p_client_id), '{}'::jsonb),
+          from auth_kit_private.permissions p
+         where p.client_digest = auth_kit_private.key_digest(p_client_id) and p.client_id = p_client_id), '{}'::jsonb),
       'roles', coalesce((
         select jsonb_object_agg(r.role_key, jsonb_build_object(
                  'description', r.description,
@@ -780,8 +906,10 @@ as $$
                  'permissions', coalesce((
                    select jsonb_agg(rp.permission_key order by auth_kit_private.utf16_key(rp.permission_key))
                      from auth_kit_private.role_permissions rp
-                    where rp.client_id = r.client_id and rp.role_key = r.role_key), '[]'::jsonb)))
-          from auth_kit_private.roles r where r.client_id = p_client_id), '{}'::jsonb))
+                    where rp.client_digest = r.client_digest and rp.role_digest = r.role_digest
+                      and rp.client_id = r.client_id and rp.role_key = r.role_key), '[]'::jsonb)))
+          from auth_kit_private.roles r
+         where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.client_id = p_client_id), '{}'::jsonb))
   end
 $$;
 
@@ -825,7 +953,7 @@ begin
   select coalesce(jsonb_object_agg(h.role_key, h.ids), '{}'::jsonb) into v_holders
     from (select m.role_key, jsonb_agg(m.user_id::text order by m.user_id::text collate "C") as ids
             from auth_kit_private.memberships m
-           where m.client_id = p_client_id
+           where m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id
            group by m.role_key) as h;
 
   for v_key in select k from jsonb_object_keys(v_before_permissions) as k
@@ -949,6 +1077,7 @@ set search_path = ''
 as $$
 declare
   v_uid uuid := auth.uid();
+  v_client_digest bytea := auth_kit_private.key_digest(p_client_id);
   v_confirmed timestamptz;
   v_policy text;
   v_enrolled_at timestamptz;
@@ -967,14 +1096,16 @@ begin
   if v_confirmed is null then
     return jsonb_build_object('result', 'email_unverified');
   end if;
-  select c.signup_policy into v_policy from auth_kit_private.clients c where c.client_id = p_client_id;
+  select c.signup_policy into v_policy from auth_kit_private.clients c
+   where c.client_digest = v_client_digest and c.client_id = p_client_id;
   if not found then
     return jsonb_build_object('result', 'unknown_client');
   end if;
   -- Enrollment is once per user and client (I12): an existing row ends the
   -- join whatever memberships exist now, so a manager's revoke stays durable.
   select e.enrolled_at into v_enrolled_at
-    from auth_kit_private.enrollments e where e.user_id = v_uid and e.client_id = p_client_id;
+    from auth_kit_private.enrollments e
+   where e.user_id = v_uid and e.client_digest = v_client_digest and e.client_id = p_client_id;
   if found then
     return jsonb_build_object('result', 'already_enrolled', 'enrolled_at', auth_kit_private.iso_utc(v_enrolled_at));
   end if;
@@ -982,7 +1113,8 @@ begin
     return jsonb_build_object('result', 'closed');
   end if;
   select array_agg(r.role_key order by auth_kit_private.utf16_key(r.role_key)) into v_roles
-    from auth_kit_private.roles r where r.client_id = p_client_id and r.self_assignable;
+    from auth_kit_private.roles r
+   where r.client_digest = v_client_digest and r.client_id = p_client_id and r.self_assignable;
   if v_roles is null then
     -- Nothing is written, so the join stays retryable once a role exists.
     return jsonb_build_object('result', 'no_default_role');
@@ -991,7 +1123,8 @@ begin
   select coalesce(array_agg(k order by auth_kit_private.utf16_key(k)), '{}'::text[]) into v_granted
     from unnest(v_roles) as k
    where not exists (select 1 from auth_kit_private.memberships m
-                      where m.user_id = v_uid and m.client_id = p_client_id and m.role_key = k);
+                      where m.user_id = v_uid and m.client_digest = v_client_digest and m.role_digest = auth_kit_private.key_digest(k)
+                        and m.client_id = p_client_id and m.role_key = k);
   insert into auth_kit_private.enrollments (user_id, client_id, enrolled_at, granted_roles)
   values (v_uid, p_client_id, now(), v_granted)
   returning enrolled_at into v_enrolled_at;
@@ -1025,7 +1158,8 @@ begin
     perform auth_kit_private.refuse('forbidden');
   end if;
   select e.enrolled_at into v_enrolled_at
-    from auth_kit_private.enrollments e where e.user_id = v_uid and e.client_id = p_client_id;
+    from auth_kit_private.enrollments e
+   where e.user_id = v_uid and e.client_digest = auth_kit_private.key_digest(p_client_id) and e.client_id = p_client_id;
   select coalesce(jsonb_agg(jsonb_build_object(
            'role_key', m.role_key,
            'flags', jsonb_build_object('self_assignable', r.self_assignable, 'manages_members', r.manages_members,
@@ -1035,13 +1169,15 @@ begin
            'permissions', coalesce((
              select jsonb_agg(rp.permission_key order by auth_kit_private.utf16_key(rp.permission_key))
                from auth_kit_private.role_permissions rp
-              where rp.client_id = m.client_id and rp.role_key = m.role_key), '[]'::jsonb),
+              where rp.client_digest = m.client_digest and rp.role_digest = m.role_digest
+                and rp.client_id = m.client_id and rp.role_key = m.role_key), '[]'::jsonb),
            'active', auth_kit_private.role_active(r.mfa_required))
          order by auth_kit_private.utf16_key(m.role_key)), '[]'::jsonb)
     into v_rows
     from auth_kit_private.memberships m
-    join auth_kit_private.roles r on r.client_id = m.client_id and r.role_key = m.role_key
-   where m.user_id = v_uid and m.client_id = p_client_id;
+    join auth_kit_private.roles r on r.client_digest = m.client_digest and r.role_digest = m.role_digest
+                                 and r.client_id = m.client_id and r.role_key = m.role_key
+   where m.user_id = v_uid and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id;
   return jsonb_build_object(
     'client_id', p_client_id,
     'enrolled_at', auth_kit_private.iso_utc(v_enrolled_at),
@@ -1089,7 +1225,9 @@ begin
   -- Authority is checked after the lock, so a concurrent revoke is seen.
   perform auth_kit_private.require_manager(p_client_id, v_actor);
   select r.manages_members into v_manages
-    from auth_kit_private.roles r where r.client_id = p_client_id and r.role_key = p_role_key;
+    from auth_kit_private.roles r
+   where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.role_digest = auth_kit_private.key_digest(p_role_key)
+     and r.client_id = p_client_id and r.role_key = p_role_key;
   if not found then
     perform auth_kit_private.refuse('unknown_role');
   elsif v_manages then
@@ -1100,10 +1238,7 @@ begin
   if p_user_id = v_actor then
     perform auth_kit_private.refuse('forbidden');
   end if;
-  insert into auth_kit_private.memberships (user_id, client_id, role_key, granted_at, granted_by, granted_via)
-  values (p_user_id, p_client_id, p_role_key, now(), v_actor, 'manager')
-  on conflict (user_id, client_id, role_key) do nothing;
-  v_inserted := found;
+  v_inserted := auth_kit_private.insert_membership(p_user_id, p_client_id, p_role_key, v_actor, 'manager');
   v_result := jsonb_build_object('result', case when v_inserted then 'granted' else 'already_member' end,
                                  'user_id', p_user_id, 'client_id', p_client_id, 'role_key', p_role_key);
   if v_inserted then
@@ -1143,7 +1278,9 @@ begin
   end if;
   perform auth_kit_private.require_manager(p_client_id, v_actor);
   select r.manages_members into v_manages
-    from auth_kit_private.roles r where r.client_id = p_client_id and r.role_key = p_role_key;
+    from auth_kit_private.roles r
+   where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.role_digest = auth_kit_private.key_digest(p_role_key)
+     and r.client_id = p_client_id and r.role_key = p_role_key;
   if not found then
     perform auth_kit_private.refuse('unknown_role');
   elsif v_manages then
@@ -1151,7 +1288,9 @@ begin
     perform auth_kit_private.refuse('forbidden');
   end if;
   delete from auth_kit_private.memberships m
-   where m.user_id = p_user_id and m.client_id = p_client_id and m.role_key = p_role_key;
+   where m.user_id = p_user_id
+     and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.role_digest = auth_kit_private.key_digest(p_role_key)
+     and m.client_id = p_client_id and m.role_key = p_role_key;
   v_deleted := found;
   v_result := jsonb_build_object('result', case when v_deleted then 'revoked' else 'not_member' end,
                                  'user_id', p_user_id, 'client_id', p_client_id, 'role_key', p_role_key);
@@ -1179,21 +1318,23 @@ begin
     perform auth_kit_private.refuse('invalid_argument');
   end if;
   perform auth_kit_private.lock_client(p_client_id);
-  insert into auth_kit_private.clients (client_id, display_name, signup_policy)
-  values (p_client_id, p_display_name, p_signup_policy)
-  on conflict (client_id) do nothing;
-  if found then
+  if not exists (select 1 from auth_kit_private.clients c
+                  where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id) then
+    -- A plain insert: a different client id with an equal digest fails.
+    insert into auth_kit_private.clients (client_id, display_name, signup_policy)
+    values (p_client_id, p_display_name, p_signup_policy);
     v_outcome := 'registered';
   else
     -- A repeat is an update of name or policy; the lifecycle state is never
     -- touched, so a live client stays live.
     update auth_kit_private.clients c
        set display_name = p_display_name, signup_policy = p_signup_policy
-     where c.client_id = p_client_id
+     where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id
        and (c.display_name <> p_display_name or c.signup_policy <> p_signup_policy);
     v_outcome := case when found then 'updated' else 'unchanged' end;
   end if;
-  select c.state into v_state from auth_kit_private.clients c where c.client_id = p_client_id;
+  select c.state into v_state from auth_kit_private.clients c
+   where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id;
   return jsonb_build_object('result', v_outcome, 'client_id', p_client_id, 'state', v_state);
 end
 $$;
@@ -1213,6 +1354,7 @@ declare
   v_result jsonb;
   v_state text;
   v_plan jsonb;
+  v_client_digest bytea := auth_kit_private.key_digest(p_client_id);
 begin
   if p_client_id is null or p_model is null or p_dry_run is null or (not p_dry_run and p_request_id is null) then
     perform auth_kit_private.refuse('invalid_argument');
@@ -1236,7 +1378,8 @@ begin
       return v_result;
     end if;
   end if;
-  select c.state into v_state from auth_kit_private.clients c where c.client_id = p_client_id;
+  select c.state into v_state from auth_kit_private.clients c
+   where c.client_digest = v_client_digest and c.client_id = p_client_id;
   if not found then
     perform auth_kit_private.refuse('unknown_client');
   end if;
@@ -1253,31 +1396,48 @@ begin
   else
     -- Order keeps every foreign key satisfied inside the one transaction:
     -- add and update first, unmap, then delete what the model no longer has.
+    -- Rows are matched by exact key text; new keys use plain inserts, so a
+    -- different key with an equal digest fails instead of being overwritten.
+    update auth_kit_private.permissions p set description = e.value #>> '{}'
+      from jsonb_each(v_model -> 'permissions') as e
+     where p.client_digest = v_client_digest and p.permission_digest = auth_kit_private.key_digest(e.key)
+       and p.client_id = p_client_id and p.permission_key = e.key and p.description <> e.value #>> '{}';
     insert into auth_kit_private.permissions (client_id, permission_key, description)
     select p_client_id, e.key, e.value #>> '{}' from jsonb_each(v_model -> 'permissions') as e
-    on conflict (client_id, permission_key) do update set description = excluded.description
-     where auth_kit_private.permissions.description <> excluded.description;
+     where not exists (select 1 from auth_kit_private.permissions p
+                        where p.client_digest = v_client_digest and p.permission_digest = auth_kit_private.key_digest(e.key)
+                          and p.client_id = p_client_id and p.permission_key = e.key);
+    update auth_kit_private.roles r
+       set description = e.value ->> 'description', self_assignable = (e.value ->> 'self_assignable')::boolean,
+           manages_members = (e.value ->> 'manages_members')::boolean, mfa_required = (e.value ->> 'mfa_required')::boolean
+      from jsonb_each(v_model -> 'roles') as e
+     where r.client_digest = v_client_digest and r.role_digest = auth_kit_private.key_digest(e.key)
+       and r.client_id = p_client_id and r.role_key = e.key
+       and (r.description, r.self_assignable, r.manages_members, r.mfa_required)
+           is distinct from (e.value ->> 'description', (e.value ->> 'self_assignable')::boolean,
+                             (e.value ->> 'manages_members')::boolean, (e.value ->> 'mfa_required')::boolean);
     insert into auth_kit_private.roles (client_id, role_key, description, self_assignable, manages_members, mfa_required)
     select p_client_id, e.key, e.value ->> 'description', (e.value ->> 'self_assignable')::boolean,
            (e.value ->> 'manages_members')::boolean, (e.value ->> 'mfa_required')::boolean
       from jsonb_each(v_model -> 'roles') as e
-    on conflict (client_id, role_key) do update
-       set description = excluded.description, self_assignable = excluded.self_assignable,
-           manages_members = excluded.manages_members, mfa_required = excluded.mfa_required
-     where (auth_kit_private.roles.description, auth_kit_private.roles.self_assignable,
-            auth_kit_private.roles.manages_members, auth_kit_private.roles.mfa_required)
-           is distinct from (excluded.description, excluded.self_assignable, excluded.manages_members, excluded.mfa_required);
+     where not exists (select 1 from auth_kit_private.roles r
+                        where r.client_digest = v_client_digest and r.role_digest = auth_kit_private.key_digest(e.key)
+                          and r.client_id = p_client_id and r.role_key = e.key);
     delete from auth_kit_private.role_permissions rp
-     where rp.client_id = p_client_id
+     where rp.client_digest = v_client_digest and rp.client_id = p_client_id
        and not coalesce((v_model -> 'roles' -> rp.role_key -> 'permissions') ? rp.permission_key, false);
     insert into auth_kit_private.role_permissions (client_id, role_key, permission_key)
     select p_client_id, e.key, p.k
       from jsonb_each(v_model -> 'roles') as e, jsonb_array_elements_text(e.value -> 'permissions') as p(k)
-    on conflict do nothing;
+     where not exists (select 1 from auth_kit_private.role_permissions rp
+                        where rp.client_digest = v_client_digest and rp.role_digest = auth_kit_private.key_digest(e.key)
+                          and rp.permission_digest = auth_kit_private.key_digest(p.k)
+                          and rp.client_id = p_client_id and rp.role_key = e.key and rp.permission_key = p.k);
     delete from auth_kit_private.roles r
-     where r.client_id = p_client_id and not ((v_model -> 'roles') ? r.role_key);
+     where r.client_digest = v_client_digest and r.client_id = p_client_id and not ((v_model -> 'roles') ? r.role_key);
     delete from auth_kit_private.permissions p
-     where p.client_id = p_client_id and not ((v_model -> 'permissions') ? p.permission_key);
+     where p.client_digest = v_client_digest and p.client_id = p_client_id
+       and not ((v_model -> 'permissions') ? p.permission_key);
     insert into auth_kit_private.model_events (request_id, model_hash, client_id, diff, actor_kind)
     values (p_request_id, v_model_hash, p_client_id, v_plan -> 'diff', 'operator');
     v_result := jsonb_build_object('result', 'applied', 'model_hash', v_model_hash, 'diff', v_plan -> 'diff');
@@ -1301,7 +1461,8 @@ begin
   if p_client_id is null then
     perform auth_kit_private.refuse('invalid_argument');
   end if;
-  if not exists (select 1 from auth_kit_private.clients c where c.client_id = p_client_id) then
+  if not exists (select 1 from auth_kit_private.clients c
+                  where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id) then
     perform auth_kit_private.refuse('unknown_client');
   end if;
   -- The file-format text itself, not jsonb: jsonb would reorder the keys.
@@ -1342,23 +1503,24 @@ begin
   if v_result is not null then
     return v_result;
   end if;
-  if not exists (select 1 from auth_kit_private.clients c where c.client_id = p_client_id) then
+  if not exists (select 1 from auth_kit_private.clients c
+                  where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id) then
     perform auth_kit_private.refuse('unknown_client');
   end if;
   select r.manages_members into v_manages
-    from auth_kit_private.roles r where r.client_id = p_client_id and r.role_key = p_role_key;
+    from auth_kit_private.roles r
+   where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.role_digest = auth_kit_private.key_digest(p_role_key)
+     and r.client_id = p_client_id and r.role_key = p_role_key;
   if not found then
     perform auth_kit_private.refuse('unknown_role');
   elsif not v_manages then
     perform auth_kit_private.refuse('not_manager_role');
   end if;
   perform auth_kit_private.confirmed_user(p_user_id);
-  insert into auth_kit_private.memberships (user_id, client_id, role_key, granted_at, granted_by, granted_via)
-  values (p_user_id, p_client_id, p_role_key, now(), null, 'operator')
-  on conflict (user_id, client_id, role_key) do nothing;
-  v_inserted := found;
+  v_inserted := auth_kit_private.insert_membership(p_user_id, p_client_id, p_role_key, null, 'operator');
   if v_inserted then
-    update auth_kit_private.clients c set state = 'live' where c.client_id = p_client_id and c.state = 'registered';
+    update auth_kit_private.clients c set state = 'live'
+     where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id and c.state = 'registered';
     insert into auth_kit_private.membership_events (request_id, payload_hash, result, action, user_id, client_id, role_key, actor_user_id, actor_kind)
     values (p_request_id, v_hash, 'granted', 'bootstrap', p_user_id, p_client_id, p_role_key, null, 'operator');
   end if;
@@ -1390,29 +1552,37 @@ begin
   if v_result is not null then
     return v_result;
   end if;
-  if not exists (select 1 from auth_kit_private.clients c where c.client_id = p_client_id) then
+  if not exists (select 1 from auth_kit_private.clients c
+                  where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id) then
     perform auth_kit_private.refuse('unknown_client');
   end if;
   select r.manages_members into v_manages
-    from auth_kit_private.roles r where r.client_id = p_client_id and r.role_key = p_role_key;
+    from auth_kit_private.roles r
+   where r.client_digest = auth_kit_private.key_digest(p_client_id) and r.role_digest = auth_kit_private.key_digest(p_role_key)
+     and r.client_id = p_client_id and r.role_key = p_role_key;
   if not found then
     perform auth_kit_private.refuse('unknown_role');
   elsif not v_manages then
     perform auth_kit_private.refuse('not_manager_role');
   end if;
   if not exists (select 1 from auth_kit_private.memberships m
-                  where m.user_id = p_user_id and m.client_id = p_client_id and m.role_key = p_role_key) then
+                  where m.user_id = p_user_id
+                    and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.role_digest = auth_kit_private.key_digest(p_role_key)
+                    and m.client_id = p_client_id and m.role_key = p_role_key) then
     v_result := jsonb_build_object('result', 'not_member', 'user_id', p_user_id, 'client_id', p_client_id, 'role_key', p_role_key);
   else
     -- A client never drops to zero assigned managers (I5).
     if not exists (select 1 from auth_kit_private.memberships m
-                     join auth_kit_private.roles r on r.client_id = m.client_id and r.role_key = m.role_key
-                    where m.client_id = p_client_id and r.manages_members
+                     join auth_kit_private.roles r on r.client_digest = m.client_digest and r.role_digest = m.role_digest
+                                                  and r.client_id = m.client_id and r.role_key = m.role_key
+                    where m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id and r.manages_members
                       and not (m.user_id = p_user_id and m.role_key = p_role_key)) then
       perform auth_kit_private.refuse('last_manager');
     end if;
     delete from auth_kit_private.memberships m
-     where m.user_id = p_user_id and m.client_id = p_client_id and m.role_key = p_role_key;
+     where m.user_id = p_user_id
+       and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.role_digest = auth_kit_private.key_digest(p_role_key)
+       and m.client_id = p_client_id and m.role_key = p_role_key;
     insert into auth_kit_private.membership_events (request_id, payload_hash, result, action, user_id, client_id, role_key, actor_user_id, actor_kind)
     values (p_request_id, v_hash, 'revoked', 'revoke_manager', p_user_id, p_client_id, p_role_key, null, 'operator');
     v_result := jsonb_build_object('result', 'revoked', 'user_id', p_user_id, 'client_id', p_client_id, 'role_key', p_role_key);
@@ -1578,9 +1748,12 @@ as $$
   select exists (
     select 1
       from auth_kit_private.memberships m
-      join auth_kit_private.roles r on r.client_id = m.client_id and r.role_key = m.role_key
-      join auth_kit_private.role_permissions rp on rp.client_id = m.client_id and rp.role_key = m.role_key
-     where m.user_id = auth.uid() and m.client_id = p_client_id and rp.permission_key = p_permission_key
+      join auth_kit_private.roles r on r.client_digest = m.client_digest and r.role_digest = m.role_digest
+                                   and r.client_id = m.client_id and r.role_key = m.role_key
+      join auth_kit_private.role_permissions rp on rp.client_digest = m.client_digest and rp.role_digest = m.role_digest
+                                               and rp.client_id = m.client_id and rp.role_key = m.role_key
+     where m.user_id = auth.uid() and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id
+       and rp.permission_digest = auth_kit_private.key_digest(p_permission_key) and rp.permission_key = p_permission_key
        and auth_kit_private.role_active(r.mfa_required))
 $$;
 
@@ -1594,8 +1767,10 @@ as $$
   select exists (
     select 1
       from auth_kit_private.memberships m
-      join auth_kit_private.roles r on r.client_id = m.client_id and r.role_key = m.role_key
-     where m.user_id = auth.uid() and m.client_id = p_client_id and m.role_key = p_role_key
+      join auth_kit_private.roles r on r.client_digest = m.client_digest and r.role_digest = m.role_digest
+                                   and r.client_id = m.client_id and r.role_key = m.role_key
+     where m.user_id = auth.uid() and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id
+       and m.role_digest = auth_kit_private.key_digest(p_role_key) and m.role_key = p_role_key
        and auth_kit_private.role_active(r.mfa_required))
 $$;
 
