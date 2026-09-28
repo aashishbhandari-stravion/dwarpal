@@ -194,6 +194,24 @@ as $$ select case when auth.uid() is null then false else auth_kit_private.has_p
     tests: ['teardown'], expect: ['a passing run whose pg_ctl stop fails'],
   },
   {
+    id: 'inspection-unknown-as-stopped', guard: 'a failed process inspection is unknown, never stopped', file: 'tests/sql/harness/cluster.js',
+    edits: [["    return { state: 'unknown', reason: `cannot inspect pid ${pid}: ${error.message}` };", "    return { state: 'gone' };"]],
+    tests: ['teardown'], expect: ['a failed process inspection leaves the server and its directory alone'],
+  },
+  {
+    id: 'search-unknown-as-absent', guard: 'a process table that cannot be searched keeps the directory', file: 'tests/sql/harness/cluster.js',
+    edits: [["    return { error: `cannot list /proc: ${error.message}` };", '    return { pids: [] };']],
+    tests: ['teardown'], expect: ['a process table that cannot be searched after the stop keeps the directory'],
+  },
+  {
+    id: 'pid-metadata-as-stopped', guard: 'damaged pid metadata never lets teardown remove a live cluster', file: 'tests/sql/harness/cluster.js',
+    edits: [
+      ['  const target = handle.pid ?? file.pid ?? null;', '  const target = file.pid ?? null;'],
+      ['  if (handle.startAttempted) {\n    const others', '  if (false) {\n    const others'],
+    ],
+    tests: ['teardown'], expect: ['teardown with an unreadable postmaster.pid', 'teardown with a missing postmaster.pid', 'teardown with a malformed postmaster.pid'],
+  },
+  {
     id: 'utf16-order', guard: 'canonical keys sort by UTF-16 code unit',
     edits: [["                                      ',' order by auth_kit_private.utf16_key(e.key)), '') || '}'", "                                      ',' order by e.key collate \"C\"), '') || '}'"]],
     tests: ['canonical'], expect: ['canonical JSON: fixed vectors match core'],

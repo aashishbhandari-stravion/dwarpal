@@ -60,7 +60,7 @@ export function createCluster({ pgBin, workDir = os.tmpdir(), logPath }) {
   fs.chmodSync(root, 0o700);
   fs.writeFileSync(path.join(root, MARKER), JSON.stringify({ createdBy: 'tests/sql/harness/cluster.js', createdAt: new Date().toISOString() }));
   const handle = {
-    root, dataDir: path.join(root, 'data'), socketDir: root, port: PORT, pgBin, pid: null, logPath: logPath ?? path.join(root, 'postgres.log'),
+    root, dataDir: path.join(root, 'data'), socketDir: root, port: PORT, pgBin, pid: null, startAttempted: false, logPath: logPath ?? path.join(root, 'postgres.log'),
   };
   // The socket lives directly in the private root; Unix socket paths are
   // limited to 107 bytes, so a deep work directory is refused up front.
@@ -95,81 +95,170 @@ export function startCluster(handle) {
     '-c log_min_messages=warning',
     '-c log_min_error_statement=panic',
   ].join(' ');
+  // From here a postmaster may exist, so teardown must establish its absence.
+  handle.startAttempted = true;
   run(path.join(handle.pgBin, 'pg_ctl'), ['-D', handle.dataDir, '-l', handle.logPath, '-o', settings, '-w', '-t', '60', 'start']);
-  handle.pid = readPid(handle);
-  if (handle.pid === null) throw new Error('pg_ctl reported a start but postmaster.pid is missing');
+  const file = readPidFile(handle);
+  if (file.pid === undefined) throw new Error(`pg_ctl reported a start but postmaster.pid is ${file.problem} (${file.detail})`);
+  if (postmasterState(file.pid, handle.dataDir).state === 'gone') throw new Error(`pg_ctl reported a start but postmaster ${file.pid} is not running`);
+  handle.pid = file.pid;
   return handle;
 }
 
-function readPid(handle) {
+/**
+ * Reads postmaster.pid: { pid } or { problem: 'missing' | 'malformed' |
+ * 'unreadable', detail }. Never throws.
+ */
+function readPidFile(handle) {
+  let text;
   try {
-    const pid = Number(fs.readFileSync(path.join(handle.dataDir, 'postmaster.pid'), 'utf8').split('\n')[0]);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    text = fs.readFileSync(path.join(handle.dataDir, 'postmaster.pid'), 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
+    if (error.code === 'ENOENT') return { problem: 'missing', detail: 'no such file' };
+    return { problem: 'unreadable', detail: error.message };
   }
+  const line = text.split('\n')[0];
+  const pid = /^[1-9][0-9]*$/.test(line) ? Number(line) : NaN;
+  return Number.isSafeInteger(pid) ? { pid } : { problem: 'malformed', detail: `first line is ${JSON.stringify(line.slice(0, 40))}` };
 }
 
+const hasProcfs = () => fs.existsSync('/proc/self');
+
 /**
- * True while `pid` is a postmaster of `dataDir`. Where /proc exists its
- * command line must name that data directory, so a recycled pid is never
- * taken for ours; elsewhere a live pid is assumed to be ours.
+ * What is known about `pid` as a postmaster of `dataDir`: { state: 'ours' }
+ * when it exists and its /proc command line names that data directory,
+ * { state: 'gone' } when it no longer exists or the pid now belongs to
+ * another program, and { state: 'unknown', reason } when that cannot be
+ * established (an inspection error, or no /proc to verify identity with).
+ * Unknown is never treated as stopped.
  */
-export function postmasterRunning(pid, dataDir) {
+function postmasterState(pid, dataDir) {
   try {
     process.kill(pid, 0);
   } catch (error) {
-    if (error.code === 'ESRCH') return false;
+    if (error.code === 'ESRCH') return { state: 'gone' };
   }
+  if (!hasProcfs()) return { state: 'unknown', reason: `pid ${pid} exists and there is no /proc to verify what it is` };
+  let args;
   try {
-    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes(dataDir);
-  } catch {
-    return !fs.existsSync('/proc/self');
+    args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return { state: 'gone' };
+    return { state: 'unknown', reason: `cannot inspect pid ${pid}: ${error.message}` };
   }
+  return args.includes(dataDir) ? { state: 'ours' } : { state: 'gone' };
 }
 
 /**
- * Stops the postmaster running in the handle's data directory, if any, and
- * removes the directory unless `keep`. Returns { root, pid, stoppedBy,
- * running, removed, failures }: stoppedBy is 'fast', 'immediate' or null
- * (nothing was running), and any failure means the teardown did not go as
- * intended even if a fallback recovered. Only a directory carrying this
- * module's marker is removed, and never while its postmaster runs.
+ * Pids of every process whose /proc command line names `dataDir`, or an
+ * error when that cannot be established. A process whose command line cannot
+ * be read is skipped only when it belongs to another user (a postmaster
+ * started here runs as this user).
+ */
+function processesNaming(dataDir) {
+  if (!hasProcfs()) return { error: 'there is no /proc to search' };
+  let entries;
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch (error) {
+    return { error: `cannot list /proc: ${error.message}` };
+  }
+  const pids = [];
+  for (const name of entries.filter((n) => /^[0-9]+$/.test(n))) {
+    try {
+      if (fs.readFileSync(`/proc/${name}/cmdline`, 'utf8').split('\0').includes(dataDir)) pids.push(Number(name));
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ESRCH') continue;
+      let uid = null;
+      try {
+        uid = fs.statSync(`/proc/${name}`).uid;
+      } catch (statError) {
+        if (statError.code === 'ENOENT') continue;
+      }
+      if (uid !== null && uid !== process.getuid()) continue;
+      return { error: `cannot inspect pid ${name}: ${error.message}` };
+    }
+  }
+  return { pids };
+}
+
+/**
+ * Stops the postmaster this handle started, if any, and removes the directory
+ * unless `keep`. Returns { root, pid, stoppedBy, running, removed, failures }:
+ * pid is the postmaster the teardown acted on (the one recorded at start, or
+ * the pid file's after a partial start), stoppedBy is 'fast', 'immediate' or
+ * null (nothing was running), running is true, false or null (unknown), and
+ * any failure means the teardown did not go as intended even if a fallback
+ * recovered.
+ *
+ * The directory is removed only when it carries this module's marker and the
+ * postmaster is positively established to be gone: the acted-on pid no longer
+ * exists as a postmaster of this data directory and, once a start was
+ * attempted, no process names the data directory. A missing, malformed or
+ * unreadable pid file never counts as "stopped"; the recorded pid is then
+ * verified through /proc and signalled directly, and a pid that cannot be
+ * verified is never signalled. When absence cannot be established the
+ * directory is kept and the report says so.
  */
 export function stopCluster(handle, { keep = false } = {}) {
   const report = { root: handle?.root ?? null, pid: null, stoppedBy: null, running: false, removed: false, failures: [] };
   if (!handle) return report;
-  try {
-    report.pid = readPid(handle);
-  } catch (error) {
-    report.failures.push(`cannot read postmaster.pid: ${error.message}`);
+  const file = readPidFile(handle);
+  if (handle.pid !== null && file.pid !== undefined && file.pid !== handle.pid) {
+    const seen = postmasterState(file.pid, handle.dataDir);
+    report.pid = file.pid;
+    report.running = seen.state === 'unknown' ? null : seen.state === 'ours';
+    report.failures.push(`postmaster.pid names ${file.pid}, not the postmaster this harness started (${handle.pid}); not stopping it`);
+    return report;
   }
-  if (report.pid !== null) {
-    report.running = postmasterRunning(report.pid, handle.dataDir);
-    if (handle.pid !== null && report.pid !== handle.pid) {
-      report.failures.push(`postmaster.pid names ${report.pid}, not the postmaster this harness started (${handle.pid}); not stopping it`);
-      return report;
+  const target = handle.pid ?? file.pid ?? null;
+  report.pid = target;
+  if (target !== null) {
+    let seen = postmasterState(target, handle.dataDir);
+    if (file.problem && (file.problem !== 'missing' || seen.state !== 'gone')) {
+      report.failures.push(`postmaster.pid is ${file.problem} (${file.detail}) while the postmaster this harness started is pid ${target}`);
     }
     for (const mode of ['fast', 'immediate']) {
-      if (!report.running) break;
-      let stopped = true;
-      try {
-        run(path.join(handle.pgBin, 'pg_ctl'), ['-D', handle.dataDir, '-m', mode, '-w', '-t', '60', 'stop'], { timeoutMs: 90_000 });
-      } catch (error) {
-        stopped = false;
-        report.failures.push(`pg_ctl ${mode} stop failed: ${error.message}`);
+      if (seen.state === 'gone') break;
+      const viaPgCtl = file.pid === target;
+      if (seen.state === 'unknown' && !(viaPgCtl && !hasProcfs())) {
+        report.failures.push(`cannot verify that pid ${target} is this cluster's postmaster (${seen.reason}); not signalling it`);
+        break;
       }
-      for (let waited = 0; waited < (stopped ? 5_000 : 500) && postmasterRunning(report.pid, handle.dataDir); waited += 50) sleep(50);
-      report.running = postmasterRunning(report.pid, handle.dataDir);
-      if (!report.running) report.stoppedBy = mode;
+      let issued = true;
+      try {
+        if (viaPgCtl) run(path.join(handle.pgBin, 'pg_ctl'), ['-D', handle.dataDir, '-m', mode, '-w', '-t', '60', 'stop'], { timeoutMs: 90_000 });
+        else process.kill(target, mode === 'fast' ? 'SIGINT' : 'SIGQUIT');
+      } catch (error) {
+        issued = false;
+        report.failures.push(`${viaPgCtl ? 'pg_ctl' : 'signalling'} ${mode} stop failed: ${error.message}`);
+      }
+      for (let waited = 0; waited < (issued ? 5_000 : 500) && postmasterState(target, handle.dataDir).state !== 'gone'; waited += 50) sleep(50);
+      seen = postmasterState(target, handle.dataDir);
+      if (seen.state === 'gone') report.stoppedBy = mode;
     }
-    if (report.running) {
-      report.failures.push(`postmaster ${report.pid} is still running`);
+    if (seen.state !== 'gone') {
+      report.running = seen.state === 'ours' ? true : null;
+      report.failures.push(seen.state === 'ours' ? `postmaster ${target} is still running` : `cannot establish that postmaster ${target} has stopped: ${seen.reason}`);
+      return report;
+    }
+  } else if (file.problem && file.problem !== 'missing') {
+    report.failures.push(`postmaster.pid is ${file.problem} (${file.detail})`);
+  }
+  if (keep) return report;
+  if (handle.startAttempted) {
+    const others = processesNaming(handle.dataDir);
+    if (others.error && !(target !== null && !hasProcfs())) {
+      report.running = null;
+      report.failures.push(`cannot establish that no postmaster uses ${handle.dataDir} (${others.error}); not removing it`);
+      return report;
+    }
+    if (others.pids?.length) {
+      report.running = true;
+      report.failures.push(`pid ${others.pids.join(', ')} still names ${handle.dataDir}; not removing it`);
       return report;
     }
   }
-  if (keep) return report;
   if (!fs.existsSync(path.join(handle.root, MARKER))) {
     report.failures.push(`${handle.root} carries no harness marker; not removing it`);
     return report;

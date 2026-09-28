@@ -133,7 +133,8 @@ function teardown(state, options) {
   const stopped = report.stoppedBy ? `stopped (postmaster pid ${report.pid}, ${report.stoppedBy} shutdown)` : 'had no running postmaster';
   if (report.failures.length > 0) {
     for (const failure of report.failures) console.error(`[sql-gates] TEARDOWN FAILED: ${failure}`);
-    const server = report.pid === null ? 'no postmaster.pid' : `postmaster pid ${report.pid} ${report.running ? 'STILL RUNNING' : 'not running'}`;
+    const running = report.running === null ? 'STATE UNKNOWN' : report.running ? 'STILL RUNNING' : 'not running';
+    const server = report.pid === null ? `no known postmaster pid, ${report.running === false ? 'none running' : running}` : `postmaster pid ${report.pid} ${running}`;
     console.error(`[sql-gates] cluster state after teardown: ${server}; directory ${report.removed ? 'removed' : `left at ${report.root}`}`);
   } else if (options.keep) {
     console.log(`[sql-gates] cluster ${stopped} and kept at ${report.root}`);
