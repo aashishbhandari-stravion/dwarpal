@@ -1,0 +1,207 @@
+/* Default screens for the dwarpal browser kit. Every selector is scoped by an
+   `ak-` class and every custom property is `--ak-` prefixed, so the sheet can
+   be added to any site without touching the host's own elements. Brand colors
+   from the client config arrive as `--ak-color-<key>` on the root element;
+   `primary`, `onPrimary`, `text`, `muted`, `surface`, `border` and `danger`
+   are used here. */
+
+.ak-root {
+  --ak-color-primary: #1f4bd8;
+  --ak-color-onPrimary: #ffffff;
+  --ak-color-text: #1b1d22;
+  --ak-color-muted: #5b6070;
+  --ak-color-surface: #ffffff;
+  --ak-color-border: #d5d8e0;
+  --ak-color-danger: #b3261e;
+  --ak-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ak-radius: 8px;
+  --ak-gap: 16px;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  padding: var(--ak-gap);
+  font-family: var(--ak-font);
+  color: var(--ak-color-text);
+  line-height: 1.5;
+}
+
+.ak-root *,
+.ak-root *::before,
+.ak-root *::after {
+  box-sizing: inherit;
+}
+
+.ak-card {
+  width: 100%;
+  max-width: 420px;
+  padding: calc(var(--ak-gap) * 1.5);
+  background: var(--ak-color-surface);
+  border: 1px solid var(--ak-color-border);
+  border-radius: var(--ak-radius);
+}
+
+.ak-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(var(--ak-gap) / 2);
+  margin-bottom: var(--ak-gap);
+}
+
+.ak-logo {
+  max-height: 40px;
+  max-width: 160px;
+}
+
+.ak-title {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 600;
+}
+
+.ak-title:focus {
+  outline: none;
+}
+
+.ak-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ak-gap);
+}
+
+.ak-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ak-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.ak-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  font: inherit;
+  color: inherit;
+  background: var(--ak-color-surface);
+  border: 1px solid var(--ak-color-border);
+  border-radius: var(--ak-radius);
+}
+
+.ak-input:focus-visible,
+.ak-button:focus-visible,
+.ak-link:focus-visible {
+  outline: 2px solid var(--ak-color-primary);
+  outline-offset: 2px;
+}
+
+.ak-button {
+  min-height: 44px;
+  padding: 8px 16px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: var(--ak-radius);
+  border: 1px solid var(--ak-color-primary);
+  cursor: pointer;
+}
+
+.ak-button--primary {
+  color: var(--ak-color-onPrimary);
+  background: var(--ak-color-primary);
+}
+
+.ak-button--secondary {
+  color: var(--ak-color-primary);
+  background: transparent;
+}
+
+.ak-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ak-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--ak-gap) / 2);
+  margin-top: var(--ak-gap);
+}
+
+.ak-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-gap);
+  margin: var(--ak-gap) 0 0;
+  font-size: 0.875rem;
+}
+
+.ak-link {
+  color: var(--ak-color-primary);
+}
+
+.ak-message {
+  margin: 0 0 var(--ak-gap);
+}
+
+.ak-hint {
+  margin: 8px 0;
+  font-size: 0.875rem;
+  color: var(--ak-color-muted);
+}
+
+.ak-status {
+  margin: 0 0 var(--ak-gap);
+  padding: 8px 12px;
+  border-radius: var(--ak-radius);
+  font-size: 0.875rem;
+}
+
+.ak-status[hidden] {
+  display: none;
+}
+
+.ak-status--info {
+  color: var(--ak-color-muted);
+  background: transparent;
+  padding-left: 0;
+}
+
+.ak-status--error {
+  color: var(--ak-color-danger);
+  border: 1px solid var(--ak-color-danger);
+}
+
+.ak-qr {
+  display: block;
+  margin: var(--ak-gap) 0;
+  background: #ffffff;
+}
+
+.ak-secret {
+  display: block;
+  margin-bottom: var(--ak-gap);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  word-break: break-all;
+}
+
+.ak-withheld {
+  margin: var(--ak-gap) 0;
+}
+
+.ak-list {
+  margin: 0;
+  padding-left: 1.25em;
+}
+
+.ak-list-item {
+  margin: 2px 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ak-button {
+    transition: background-color 120ms ease, opacity 120ms ease;
+  }
+}
