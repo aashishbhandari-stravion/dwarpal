@@ -1,6 +1,6 @@
 # SQL gates
 
-Executable checks for `supabase/migrations/` against a real PostgreSQL server. They cover the migration lifecycle, the complete grant table, role and claim impersonation, canonical JSON and hash parity with `packages/core`, model apply/export, enrollment, request-id retries, per-client locking and the MFA-reset claim. No emulator or in-memory imitation is involved.
+Executable checks for `supabase/migrations/` against a real PostgreSQL server. They cover the migration lifecycle, the complete grant table and its drift audit (column privileges and profile policies), role and claim impersonation, canonical JSON and hash parity with `packages/core`, opaque keys of any length, model apply/export, enrollment, request-id retries, per-client locking, the MFA-reset claim, and the runner's own cleanup. No emulator or in-memory imitation is involved.
 
 ## Requirements
 
@@ -21,9 +21,11 @@ The script verifies the tarball against a pinned SHA-256 before extracting it an
 DWARPAL_PG_BIN=<runtime-dir>/install/bin node tests/sql/run.js
 ```
 
-Options: `--work-dir <dir>` (parent of the throwaway cluster; Unix socket paths are limited to 107 bytes, so keep it short), `--concurrency <n>`, `--timeout <seconds>`, `--tap <file>`, `--keep`, and individual case files as arguments. The exit status is that of the test run.
+Options: `--work-dir <dir>` (parent of the throwaway cluster; Unix socket paths are limited to 107 bytes, so keep it short), `--concurrency <n>`, `--timeout <seconds>`, `--tap <file>`, `--keep`, and individual case files as arguments.
 
-Each run creates a new cluster in a fresh temporary directory, listening only on a Unix socket inside that directory (`listen_addresses` is empty and the directory is private to the user), prepares two template databases and runs `cases/*.test.js`. Every test clones its own database from a template and drops it afterwards. On exit the runner stops the postmaster it started and removes only the directory it created.
+Each run creates a new cluster in a fresh temporary directory, listening only on a Unix socket inside that directory (`listen_addresses` is empty and the directory is private to the user), prepares two template databases and runs `cases/*.test.js`. Every test clones its own database from a template and drops it afterwards. On exit, including after a failed start, the runner stops the postmaster running in the directory it created (a fast shutdown, then one immediate shutdown if that fails), checks that the process is gone, and only then removes that directory; it never touches another server or directory. SIGINT or SIGTERM stops the test run first and then tears down the same way; a second signal tears down at once.
+
+Exit status: 128 plus the signal number when interrupted; otherwise the test run's status when tests failed; otherwise 1 when the harness or the teardown failed; 0 only when the tests passed and the cluster was verifiably stopped and removed. The last line states the status and its parts, for example `[sql-gates] exit status 0: tests 0, harness ok, teardown ok`. A teardown failure is printed as `TEARDOWN FAILED: ...` together with the postmaster pid and directory it left behind; a failed fast shutdown stays a failure even when the immediate one recovers.
 
 Guard sensitivity:
 
@@ -31,7 +33,7 @@ Guard sensitivity:
 DWARPAL_PG_BIN=<runtime-dir>/install/bin node tests/sql/sensitivity.js [--work-dir <dir>] [--report <file>]
 ```
 
-For each critical guard it removes that guard from a disposable copy of the migration and requires the named test to fail; an unmutated copy runs first and must pass. The repository is never modified.
+For each critical guard it removes that guard from a disposable copy of the migration (or of the runner) and requires the named test to fail; an unmutated copy runs first and must pass. The repository is never modified.
 
 ## Layout
 
@@ -45,7 +47,7 @@ For each critical guard it removes that guard from a disposable copy of the migr
 | `harness/kit.js` | Kit calls through the exposed wrappers, a synthetic example model, whole-state snapshots. |
 | `fixtures/supabase-roles.sql`, `fixtures/supabase-auth.sql` | The Supabase roles and `auth` schema slice the migration relies on. |
 | `fixtures/faults.sql` | Test-only fault injection triggers, installed per test for rollback gates. |
-| `cases/*.test.js` | The gates. |
+| `cases/*.test.js` | The gates. `opaque-keys` covers keys over the index limit and a copy with a deliberately colliding key digest; `access-audit` covers drift the grant assertion must report; `teardown` runs the runner itself with injected `initdb`/`pg_ctl` failures and signals. |
 
 ## Fixture versus hosted Supabase
 

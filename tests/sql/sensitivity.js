@@ -22,7 +22,8 @@ const repoRoot = path.resolve(here, '..', '..');
 const MIGRATION = 'supabase/migrations/20260927000000_dwarpal_auth_kit.sql';
 
 // Each mutation: the guard it removes, exact text edits (each anchor must
-// occur exactly once), the case files to run and test-name prefixes that must fail.
+// occur exactly once) in the migration or in `file`, the case files to run
+// and test-name prefixes that must fail.
 const MUTATIONS = [
   {
     id: 'retry-fingerprint', guard: 'a reused request id with a changed payload is request_conflict',
@@ -153,8 +154,44 @@ as $$ select case when auth.uid() is null then false else auth_kit_private.has_p
   },
   {
     id: 'client-scope', guard: 'helpers read only the named client',
-    edits: [['     where m.user_id = auth.uid() and m.client_id = p_client_id and rp.permission_key = p_permission_key', '     where m.user_id = auth.uid() and rp.permission_key = p_permission_key']],
+    edits: [['     where m.user_id = auth.uid() and m.client_digest = auth_kit_private.key_digest(p_client_id) and m.client_id = p_client_id\n       and rp.permission_digest',
+      '     where m.user_id = auth.uid()\n       and rp.permission_digest']],
     tests: ['access'], expect: ['no cross-client leakage'],
+  },
+  {
+    id: 'exact-reference', guard: 'a membership must name its role by exact text, not only by digest',
+    edits: [['create trigger exact_key_reference after insert or update of client_id, role_key on auth_kit_private.memberships\n  for each row execute function auth_kit_private.exact_key_reference();\n', '']],
+    tests: ['opaque-keys'], expect: ['with a deliberately colliding digest'],
+  },
+  {
+    id: 'exact-lookup', guard: 'has_role compares the role key text, not only its digest',
+    edits: [['       and m.role_digest = auth_kit_private.key_digest(p_role_key) and m.role_key = p_role_key', '       and m.role_digest = auth_kit_private.key_digest(p_role_key)']],
+    tests: ['opaque-keys'], expect: ['with a deliberately colliding digest'],
+  },
+  {
+    id: 'column-audit', guard: 'the audit checks column privileges on every kit relation',
+    edits: [["     where r.relkind <> 'S' and a.attnum > 0 and not a.attisdropped),", "     where r.relkind <> 'S' and a.attnum > 0 and not a.attisdropped and r.label = 'auth_kit.profiles'),"]],
+    tests: ['access-audit'], expect: ['column-only grants on kit relations', "the migration's final assertion aborts the installation on a private column-only grant"],
+  },
+  {
+    id: 'policy-expression-audit', guard: 'the audit compares each own-row policy expression',
+    edits: [['                      and p.roles = array[\'authenticated\'] and p.qual is not distinct from e.qual', "                      and p.roles = array['authenticated']"]],
+    tests: ['access-audit'], expect: ['profile policy drift is reported', "the migration's final assertion aborts the installation on a changed profile policy"],
+  },
+  {
+    id: 'extra-policy-audit', guard: 'the audit reports policies it did not install',
+    edits: [['     where not exists (select 1 from expected_policies e where e.relation = p.relation and e.name = p.name)', '     where false']],
+    tests: ['access-audit'], expect: ['profile policy drift is reported', "the migration's final assertion aborts the installation on an added profile policy"],
+  },
+  {
+    id: 'noop-bootstrap-live', guard: 'a bootstrap that finds the membership present still makes the client live',
+    edits: [["  update auth_kit_private.clients c set state = 'live'\n   where", "  update auth_kit_private.clients c set state = 'live'\n   where v_inserted and"]],
+    tests: ['membership'], expect: ['bootstrap that finds an existing manager membership'],
+  },
+  {
+    id: 'teardown-status', guard: 'a teardown failure makes the runner exit nonzero', file: 'tests/sql/run.js',
+    edits: [['  if (harnessError || report.failures.length > 0) return 1;', '  if (harnessError) return 1;']],
+    tests: ['teardown'], expect: ['a passing run whose pg_ctl stop fails'],
   },
   {
     id: 'utf16-order', guard: 'canonical keys sort by UTF-16 code unit',
@@ -225,13 +262,13 @@ function main() {
   let ok = baseline.status === 0 && baseline.failed.length === 0;
   for (const mutation of selected) {
     const outcome = withCopy((copy) => {
-      applyEdits(path.join(copy, MIGRATION), mutation.edits);
+      applyEdits(path.join(copy, mutation.file ?? MIGRATION), mutation.edits);
       return runGates(copy, mutation.tests, options.workDir);
     });
     const missing = mutation.expect.filter((prefix) => !outcome.failed.some((name) => name.startsWith(prefix)));
     const detected = outcome.status !== 0 && missing.length === 0;
     ok &&= detected;
-    report.mutations.push({ id: mutation.id, guard: mutation.guard, tests: mutation.tests, expect: mutation.expect, status: outcome.status, failed: outcome.failed, missing, detected });
+    report.mutations.push({ id: mutation.id, guard: mutation.guard, file: mutation.file ?? MIGRATION, tests: mutation.tests, expect: mutation.expect, status: outcome.status, failed: outcome.failed, missing, detected });
     console.log(`[sensitivity] ${detected ? 'detected' : 'NOT DETECTED'} ${mutation.id}: exit ${outcome.status}; failing: ${outcome.failed.join(' | ') || 'none'}`);
   }
   if (options.report) fs.writeFileSync(options.report, `${JSON.stringify(report, null, 2)}\n`);
