@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocalJWKSet, jwtVerify, decodeJwt } from 'jose';
 import { PASSWORD, client, raiseToAal2, raw, signedIn, start } from './support.js';
+import { totpCode, totpMatches } from '../../packages/emulator/lib/crypto.js';
 
 const counts = (emulator) => emulator.controls.snapshot().counts;
 const userOf = (emulator, email) => emulator.controls.snapshot().users.find((u) => u.email === email);
@@ -319,6 +320,50 @@ test('TOTP: enrol, challenge and verify raise the session to aal2; wrong, expire
   emulator.controls.advanceTime(300_000);
   const expired = await supabase.auth.mfa.verify({ factorId, challengeId: late.data.id, code: emulator.controls.totpCode({ factorId }) });
   assert.equal(expired.error.code, 'mfa_challenge_expired');
+});
+
+test('TOTP at fixture clock 0: a valid code verifies; a wrong code is refused without raising AAL or consuming the challenge', async (t) => {
+  const emulator = await start(t, { now: 0 });
+  const { supabase, userId } = await signedIn(emulator, 'epoch@example.test');
+  const enrolled = await supabase.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'phone' });
+  assert.equal(enrolled.error, null);
+  const factorId = enrolled.data.id;
+  const secret = enrolled.data.totp.secret;
+  const code = emulator.controls.totpCode({ factorId });
+  assert.equal(code, totpCode(secret, 0));
+  // At step 0 the window is steps 0 and 1; one of three distinct codes is outside it.
+  const window = new Set([totpCode(secret, 0, 0), totpCode(secret, 0, 1)]);
+  const wrong = ['000000', '111111', '222222'].find((candidate) => !window.has(candidate));
+
+  const challenge = await supabase.auth.mfa.challenge({ factorId });
+  assert.equal(challenge.error, null);
+  const bad = await supabase.auth.mfa.verify({ factorId, challengeId: challenge.data.id, code: wrong });
+  assert.equal(bad.error.status, 422);
+  assert.equal(bad.error.code, 'mfa_verification_failed');
+  const session = (await supabase.auth.getSession()).data.session;
+  assert.equal(decodeJwt(session.access_token).aal, 'aal1');
+  const level = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  assert.equal(level.data.currentLevel, 'aal1');
+  assert.equal(emulator.controls.snapshot().users.find((u) => u.userId === userId).factors[0].status, 'unverified');
+
+  const good = await supabase.auth.mfa.verify({ factorId, challengeId: challenge.data.id, code });
+  assert.equal(good.error, null, 'the refused attempt left the challenge usable');
+  assert.equal(decodeJwt(good.data.access_token).aal, 'aal2');
+  assert.equal(emulator.controls.snapshot().users.find((u) => u.userId === userId).factors[0].status, 'verified');
+});
+
+test('TOTP codes follow RFC 6238; the window is the current step and one either side, without steps before the epoch', () => {
+  const rfcSecret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'; // ASCII "12345678901234567890"
+  assert.equal(totpCode(rfcSecret, 59_000), '287082');
+  assert.equal(totpCode(rfcSecret, 1_111_111_109_000), '081804');
+  const code = (step) => totpCode(rfcSecret, step * 30_000);
+  for (const at of [0, 29_999]) {
+    assert.equal(totpMatches(rfcSecret, at, code(0)), true);
+    assert.equal(totpMatches(rfcSecret, at, code(1)), true);
+    assert.equal(totpMatches(rfcSecret, at, code(2)), code(2) === code(0) || code(2) === code(1));
+  }
+  for (const step of [0, 1, 2]) assert.equal(totpMatches(rfcSecret, 30_000, code(step)), true, `step ${step} is inside the window at step 1`);
+  assert.equal(totpMatches(rfcSecret, 30_000, code(3)), [0, 1, 2].some((s) => code(s) === code(3)));
 });
 
 test('a user seeded at aal2 signs in at aal1 with aal2 next; a new factor then needs aal2 first', async (t) => {

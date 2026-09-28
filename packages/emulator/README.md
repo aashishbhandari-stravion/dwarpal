@@ -79,14 +79,16 @@ Auth answers carry `x-supabase-api-version: 2024-01-01`. Errors use the body
 | `POST /logout?scope=global\|local\|others` | `global_sign_out` | Revokes the user's sessions for that scope (global by default) and answers 204. Revoked sessions fail `GET /user` and refresh. |
 | `POST /factors` | `mfa_enroll` | TOTP only. Returns `{ id, type, friendly_name, totp: { qr_code, secret, uri } }`; `qr_code` is a synthetic placeholder SVG. Refusals: 422 `mfa_factor_name_conflict`; 403 `insufficient_aal` when a verified factor exists and the session is `aal1`; 422 `too_many_enrolled_mfa_factors` beyond 10. |
 | `POST /factors/:id/challenge` | – | 404 `mfa_factor_not_found` for another user's or an unknown factor. A challenge lasts 5 minutes. |
-| `POST /factors/:id/verify` | `mfa_verify` | RFC 6238 TOTP (SHA-1, 30 s, 6 digits, ±1 step) at the fixture clock. 422 `mfa_verification_failed` for a wrong code (the challenge stays); 422 `mfa_challenge_expired` for an expired, used or foreign challenge. Success verifies the factor, raises the session to `aal2` (`amr` starts with `totp`) and returns new tokens. |
+| `POST /factors/:id/verify` | `mfa_verify` | RFC 6238 TOTP (SHA-1, 30 s, 6 digits, ±1 step; no step before the epoch, so `now: 0` is valid) at the fixture clock. 422 `mfa_verification_failed` for a wrong code (the challenge stays); 422 `mfa_challenge_expired` for an expired, used or foreign challenge. Success verifies the factor, raises the session to `aal2` (`amr` starts with `totp`) and returns new tokens. |
 
 Access tokens are ES256 JWTs. Their claims are `aud`, `exp`, `iat`, `iss`,
 `sub`, `email`, `phone`, `app_metadata`, `user_metadata`, `role:
 authenticated`, `aal`, `amr`, `session_id` and `is_anonymous`. Expiry and link,
 flow and challenge lifetimes all use the fixture clock. supabase-js compares
 `expires_at` with the real clock, so after a large `advanceTime` a stored token
-can look valid to the client while the fixture treats it as expired.
+can look valid to the client while the fixture treats it as expired. The
+reverse also holds: with `now` well behind the real clock (for example `now: 0`),
+the client treats a fresh session as expired and tries to refresh it before use.
 
 ## PostgREST RPC (`/rest/v1/rpc/<fn>`, schema `auth_kit`)
 

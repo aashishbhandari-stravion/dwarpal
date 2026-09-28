@@ -94,10 +94,17 @@ export function totpCode(secret, atMs, stepOffset = 0) {
   return String(binary % 1_000_000).padStart(6, '0');
 }
 
-/** Accepts the current step and one step either side, as TOTP verifiers commonly do. */
+/**
+ * Accepts the current step and one step either side, as TOTP verifiers commonly
+ * do. In the first step after the epoch there is no prior step, so the window
+ * holds only the steps with a nonnegative counter.
+ */
 export function totpMatches(secret, atMs, code) {
   if (typeof code !== 'string' || !/^\d{6}$/.test(code)) return false;
-  return [-1, 0, 1].some((offset) => timingSafeEqual(Buffer.from(totpCode(secret, atMs, offset)), Buffer.from(code)));
+  const step = Math.floor(atMs / 30_000);
+  return [-1, 0, 1]
+    .filter((offset) => step + offset >= 0)
+    .some((offset) => timingSafeEqual(Buffer.from(totpCode(secret, atMs, offset)), Buffer.from(code)));
 }
 
 function base32Encode(buffer) {
