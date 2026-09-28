@@ -1920,6 +1920,22 @@ as $$
   profile_columns(name, can_select, can_insert, can_update) as (values
     ('user_id', true, true, false), ('display_name', true, true, true), ('contact_email', true, true, true),
     ('contact_phone', true, true, true), ('updated_at', true, false, false)),
+  relation_columns as (
+    select r.oid, r.label, r.schema_name, a.attnum, a.attname
+      from relations r join pg_attribute a on a.attrelid = r.oid
+     where r.relkind <> 'S' and a.attnum > 0 and not a.attisdropped),
+  -- The only policies in either schema: own-row access to profiles.
+  expected_policies(relation, name, command, qual, with_check) as (values
+    ('auth_kit.profiles', 'profiles_select_own', 'r', '(user_id = ( SELECT auth.uid() AS uid))', null),
+    ('auth_kit.profiles', 'profiles_insert_own', 'a', null, '(user_id = ( SELECT auth.uid() AS uid))'),
+    ('auth_kit.profiles', 'profiles_update_own', 'w', '(user_id = ( SELECT auth.uid() AS uid))', '(user_id = ( SELECT auth.uid() AS uid))')),
+  policies as (
+    select r.label as relation, pol.polname as name, pol.polcmd::text as command, pol.polpermissive as permissive,
+           (select coalesce(array_agg(n.role order by n.role), '{}')
+              from (select case when o = 0 then 'public' else o::regrole::text end as role
+                      from unnest(pol.polroles) as o) as n) as roles,
+           pg_get_expr(pol.polqual, pol.polrelid) as qual, pg_get_expr(pol.polwithcheck, pol.polrelid) as with_check
+      from pg_policy pol join relations r on r.oid = pol.polrelid),
   checks as (
     -- Function inventory: every expected function exists.
     select e.schema_name || '.' || e.name as object, '-' as grantee, 'EXISTS' as privilege, true as expected,
@@ -1980,19 +1996,43 @@ as $$
       from relations r
      where r.schema_name = 'auth_kit' and r.name not in ('profiles', 'public_clients')
     union all
-    -- profiles: own-row access for authenticated is column grants plus RLS.
-    select 'auth_kit.profiles.' || c.name, g.role, p.privilege,
-           case when g.role = 'service_role' then true
-                when g.role = 'authenticated' then
-                  case p.privilege when 'SELECT' then c.can_select when 'INSERT' then c.can_insert
-                                   when 'UPDATE' then c.can_update else false end
+    -- Effective column privileges on every column of every relation: a
+    -- column-only grant never shows in has_table_privilege. authenticated
+    -- reaches profiles through the column allowlist plus RLS, and
+    -- public_clients through its two columns; nothing else.
+    select c.label || '.' || c.attname, g.role, p.privilege,
+           case when g.role = 'service_role' then c.label in ('auth_kit.profiles', 'auth_kit.public_clients') or c.schema_name = 'auth_kit_private'
+                when g.role <> 'authenticated' then false
+                when c.label = 'auth_kit.profiles' then
+                  coalesce((select case p.privilege when 'SELECT' then pc.can_select when 'INSERT' then pc.can_insert
+                                                    when 'UPDATE' then pc.can_update else false end
+                              from profile_columns pc where pc.name = c.attname), false)
+                when c.label = 'auth_kit.public_clients' then p.privilege = 'SELECT' and c.attname in ('client_id', 'display_name')
                 else false end,
-           has_column_privilege(g.role, 'auth_kit.profiles'::regclass, c.name, p.privilege)
-      from profile_columns c cross join grantees g
+           has_column_privilege(g.role, c.oid, c.attnum, p.privilege)
+      from relation_columns c cross join grantees g
       cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) as p(privilege)
     union all
     select 'auth_kit.profiles', '-', 'ROW LEVEL SECURITY', true, r.relrowsecurity
       from relations r where r.label = 'auth_kit.profiles'
+    union all
+    -- Each own-row policy exists exactly as installed: command, permissive,
+    -- roles and expressions. A missing or changed one is reported here, an
+    -- additional one (or one on another relation) below.
+    select e.relation || ' policy ' || e.name, 'authenticated', 'POLICY', true,
+           exists (select 1 from policies p
+                    where p.relation = e.relation and p.name = e.name and p.command = e.command and p.permissive
+                      and p.roles = array['authenticated'] and p.qual is not distinct from e.qual
+                      and p.with_check is not distinct from e.with_check)
+      from expected_policies e
+    union all
+    select p.relation || ' policy ' || p.name, array_to_string(p.roles, ','), 'POLICY', false, true
+      from policies p
+     where not exists (select 1 from expected_policies e where e.relation = p.relation and e.name = p.name)
+    union all
+    -- Row security means nothing to a role that bypasses it.
+    select 'role ' || g.rolname, g.rolname, 'BYPASSRLS', false, g.rolbypassrls
+      from pg_roles g where g.rolname in ('anon', 'authenticated')
     union all
     -- Default privileges in the two schemas never grant to anon, authenticated or PUBLIC.
     select 'default privileges in ' || n.nspname, coalesce(g.rolname, 'public'), a.privilege_type, false, true
