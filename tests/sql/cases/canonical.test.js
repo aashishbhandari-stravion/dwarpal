@@ -194,7 +194,7 @@ function parityModels() {
     ['prototype-like names', JSON.parse('{"client":"__proto__","roles":{"__proto__":{"manages_members":true,"permissions":["constructor","__proto__"]},"constructor":{"self_assignable":true,"permissions":["toString"]}},"permissions":{"constructor":"c","__proto__":"p","toString":"t","hasOwnProperty":""}}')],
     ['integer-looking keys', { client: '0', roles: { 10: { manages_members: true, permissions: ['2', '10', '1'] }, 2: { permissions: ['01'] }, '01': { mfa_required: true } }, permissions: { 1: '', 2: '', 10: '', '01': '' } }],
     ['unicode ordering', { client: '\u{1f600}', roles: { '￿': { manages_members: true, permissions: ['\u{1f600}', '', 'z'] }, '\u{10000}': { description: '  "\\\u0001' } }, permissions: { '\u{1f600}': 'smile', '': '', z: 'last' } }],
-    ['astral description at the bound', { client: 'c', roles: { m: { manages_members: true, description: '\u{1f600}'.repeat(512) } }, permissions: { k: '\u{10000}'.repeat(512) } }],
+    ['supplementary-plane description at the bound', { client: 'c', roles: { m: { manages_members: true, description: '\u{1f600}'.repeat(512) } }, permissions: { k: '\u{10000}'.repeat(512) } }],
     ['duplicate-free unsorted lists and defaults', { client: 'c', roles: { m: { manages_members: true, permissions: ['c', 'a', 'b'] }, x: {} }, permissions: { a: '', b: '', c: '' } }],
     ['bounds: 256 roles, 2048 permissions', { client: 'big', roles: bigRoles, permissions: bigPermissions }],
   ];
