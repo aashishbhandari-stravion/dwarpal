@@ -1,11 +1,14 @@
 // Supabase Auth admin API calls made by the operator client, each bounded by
 // its own abort deadline (20 s by default, design 4.1 / G4). Answers are
 // validated to the fields the kit uses; a peer's text is never kept. A
-// failure is an OperatorError with a fixed stage and reason tag.
+// failure is an OperatorError with a fixed stage and reason tag. For the two
+// writes (invite, delete factor) a lost answer, a 5xx or an unreadable
+// success may follow an applied change, so each is `outcome_unknown` with
+// the caller's recovery tag; a 4xx is Auth's refusal and stays `unavailable`.
 
 import { UUID_PATTERN } from '../../core/shape.js';
 import { request, parseJson, tryParseJson, TransportError } from './http.js';
-import { OperatorError } from './operator-error.js';
+import { OperatorError, outcomeUnknown } from './operator-error.js';
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_FACTORS = 100;
@@ -25,7 +28,8 @@ function isTimestamp(value) {
  * @param {{ fetch: typeof fetch, timers: object, origin: string, secretKey: string, timeoutMs: number }} options
  */
 export function createAdminApi({ fetch: fetchImpl, timers, origin, secretKey, timeoutMs }) {
-  async function call(stage, method, path, { body, uncertain = false } = {}) {
+  // `recovery` marks a write: its failures after sending are outcome_unknown.
+  async function call(stage, method, path, { body, recovery = null } = {}) {
     try {
       return await request(fetchImpl, `${origin}/auth/v1${path}`, {
         method,
@@ -42,7 +46,8 @@ export function createAdminApi({ fetch: fetchImpl, timers, origin, secretKey, ti
       });
     } catch (error) {
       if (!(error instanceof TransportError)) throw error;
-      throw new OperatorError(uncertain ? 'outcome_unknown' : 'unavailable', { stage, reason: error.reason });
+      if (recovery !== null) throw outcomeUnknown(stage, error.reason, recovery);
+      throw new OperatorError('unavailable', { stage, reason: error.reason });
     }
   }
 
@@ -59,7 +64,8 @@ export function createAdminApi({ fetch: fetchImpl, timers, origin, secretKey, ti
     return isObject(body) && typeof body.error_code === 'string' ? body.error_code : null;
   }
 
-  function unexpected(stage, response) {
+  function unexpected(stage, response, recovery = null) {
+    if (recovery !== null && response.status >= 500) return outcomeUnknown(stage, `http_${response.status}`, recovery);
     return new OperatorError('unavailable', { stage, reason: `http_${response.status}` });
   }
 
@@ -103,11 +109,19 @@ export function createAdminApi({ fetch: fetchImpl, timers, origin, secretKey, ti
       };
     },
 
-    /** Sends an invitation. A lost answer may still have sent the e-mail. */
+    /**
+     * Sends an invitation. A lost or unreadable answer may still have sent the
+     * e-mail; a rerun of the lookup finds the invited address and invites no one.
+     */
     async inviteUserByEmail(email) {
-      const response = await call('invite', 'POST', '/invite', { body: { email }, uncertain: true });
-      if (response.status !== 200) throw unexpected('invite', response);
-      return readUser('invite', json('invite', response));
+      const recovery = 'rerun_lookup_before_invite';
+      const response = await call('invite', 'POST', '/invite', { body: { email }, recovery });
+      if (response.status !== 200) throw unexpected('invite', response, recovery);
+      try {
+        return readUser('invite', json('invite', response));
+      } catch {
+        throw outcomeUnknown('invite', 'malformed', recovery);
+      }
     },
 
     /** Ids of the user's verified TOTP factors, sorted. */
@@ -135,10 +149,12 @@ export function createAdminApi({ fetch: fetchImpl, timers, origin, secretKey, ti
      * @returns {Promise<'deleted' | 'not_found'>}
      */
     async deleteFactor(userId, factorId) {
-      const response = await call('delete_factor', 'DELETE', `${USERS}/${userId}/factors/${factorId}`);
+      // The reset's claim stays pending; the same request id resumes it.
+      const recovery = 'rerun_same_request_id';
+      const response = await call('delete_factor', 'DELETE', `${USERS}/${userId}/factors/${factorId}`, { recovery });
       if (response.status === 200) return 'deleted';
       if (response.status === 404 && errorCode(response) === 'mfa_factor_not_found') return 'not_found';
-      throw unexpected('delete_factor', response);
+      throw unexpected('delete_factor', response, recovery);
     },
   });
 }

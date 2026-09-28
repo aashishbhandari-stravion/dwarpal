@@ -6,10 +6,12 @@
 //
 // Outcomes: a kit refusal (SQLSTATE DW001) becomes an OperatorError with its
 // own code; any other answer to a read is `unavailable`; any other answer to
-// a write is `outcome_unknown`, because the write may have committed before
-// the answer was lost, and the same request id then returns the stored
-// result. Results are validated against the exact wire shape before they are
-// reported.
+// a write, including a success whose body is unreadable or of the wrong
+// shape, is `outcome_unknown`, because the write may have committed. Its
+// `recovery` tag says how to converge: the same request id returns the stored
+// result, and register_client, which has no request id, is an upsert that
+// the same arguments repeat safely. Results are validated against the exact
+// wire shape before they are reported.
 
 import { isAuthError, validateModel, validateClientConfig, modelHash, canonicalModelJson, sha256Hex } from '../core/index.js';
 import { isOpaqueKey, UUID_PATTERN, compareCodeUnits, deepFreeze } from '../core/shape.js';
@@ -18,13 +20,13 @@ import { projectOrigin, secretKeyKind, serverConfigIssues } from './lib/keys.js'
 import { callRpc } from './lib/postgrest.js';
 import { createAdminApi } from './lib/admin.js';
 import { createManagementApi } from './lib/management.js';
-import { OperatorError, OPERATOR_ERROR_CODES, isOperatorError } from './lib/operator-error.js';
+import { OperatorError, OPERATOR_ERROR_CODES, RECOVERY, isOperatorError, outcomeUnknown } from './lib/operator-error.js';
 import { scanForEmail } from './lib/lookup.js';
 import { runMfaReset } from './lib/mfa-reset.js';
 import { readMigrations, migrate as runMigrations, DEFAULT_MIGRATIONS_DIR } from './lib/migrate.js';
 import { runDoctor } from './lib/doctor.js';
 
-export { OperatorError, OPERATOR_ERROR_CODES, isOperatorError };
+export { OperatorError, OPERATOR_ERROR_CODES, RECOVERY, isOperatorError };
 
 export const ADMIN_CALL_TIMEOUT_MS = 20_000;
 const HASH = /^[0-9a-f]{64}$/;
@@ -73,6 +75,15 @@ function exactKeys(value, keys) {
 
 function malformed(stage) {
   return new OperatorError('unavailable', { stage, reason: 'malformed' });
+}
+
+function recoveryFor(fn) {
+  return fn === 'register_client' ? 'rerun_same_arguments' : 'rerun_same_request_id';
+}
+
+// A write whose success answer cannot be read: it may have committed.
+function malformedWrite(fn) {
+  return outcomeUnknown(fn, 'malformed', recoveryFor(fn));
 }
 
 // Validation issues keep only structural paths and rule names.
@@ -145,14 +156,15 @@ export function createOperatorClient(options) {
       if (!REFUSALS[fn].includes(outcome.code)) throw new OperatorError('unavailable', { stage: fn, reason: 'unexpected_refusal' });
       throw new OperatorError(outcome.code, { stage: fn, ...(details ? details(outcome.code, outcome.detail) : {}) });
     }
-    throw new OperatorError(write ? 'outcome_unknown' : 'unavailable', { stage: fn, reason: outcome.reason });
+    if (write) throw outcomeUnknown(fn, outcome.reason, recoveryFor(fn));
+    throw new OperatorError('unavailable', { stage: fn, reason: outcome.reason });
   }
 
   function membershipResult(stage, value, results, expected) {
     if (!exactKeys(value, ['result', 'user_id', 'client_id', 'role_key']) || !results.includes(value.result)
         || typeof value.user_id !== 'string' || value.user_id.toLowerCase() !== expected.userId
         || value.client_id !== expected.clientId || value.role_key !== expected.roleKey) {
-      throw malformed(stage);
+      throw malformedWrite(stage);
     }
     return deepFreeze({ result: value.result, userId: expected.userId, clientId: expected.clientId, roleKey: expected.roleKey });
   }
@@ -222,7 +234,7 @@ export function createOperatorClient(options) {
       const value = await rpc('register_client', { client_id: clientId, display_name: displayName, signup_policy: signupPolicy }, { write: true });
       if (!exactKeys(value, ['result', 'client_id', 'state']) || !['registered', 'updated', 'unchanged'].includes(value.result)
           || value.client_id !== clientId || !['registered', 'live'].includes(value.state)) {
-        throw malformed('register_client');
+        throw malformedWrite('register_client');
       }
       return deepFreeze({ result: value.result, clientId, state: value.state });
     },
@@ -245,7 +257,7 @@ export function createOperatorClient(options) {
       const results = dryRun ? ['dry_run'] : ['applied', 'unchanged'];
       if (!exactKeys(value, expected) || !results.includes(value.result) || !HASH.test(value.model_hash) || !Array.isArray(value.diff)
           || (dryRun && (typeof value.changed !== 'boolean' || !Array.isArray(value.refusals)))) {
-        throw malformed('apply_model');
+        throw dryRun ? malformed('apply_model') : malformedWrite('apply_model');
       }
       return deepFreeze({
         result: value.result,
@@ -277,6 +289,11 @@ export function createOperatorClient(options) {
       // The canonical input is verified with getUserById, even after a lookup.
       const user = await admin.getUserById(target);
       if (user === null || user.anonymous) throw new OperatorError('unknown_user', { stage: 'get_user' });
+      // The address can change between the listing and this read: the grant
+      // goes only to a user who still holds the address the operator gave.
+      if (email !== undefined && (user.email === null || user.email.toLowerCase() !== email.toLowerCase())) {
+        throw new OperatorError('unknown_user', { stage: 'get_user', reason: 'email_changed' });
+      }
       if (!user.confirmed) throw new OperatorError('email_unverified', { stage: 'get_user' });
       const value = await rpc('bootstrap_manager', { user_id: target, client_id: clientId, role_key: roleKey, request_id: id }, { write: true });
       return membershipResult('bootstrap_manager', value, ['granted', 'already_member'], { userId: target, clientId, roleKey });

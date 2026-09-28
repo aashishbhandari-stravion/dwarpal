@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOperatorClient, OperatorError, OPERATOR_ERROR_CODES } from '../../packages/server/operator.js';
+import { createOperatorClient, OperatorError, OPERATOR_ERROR_CODES, RECOVERY } from '../../packages/server/operator.js';
 import { AUTH_ERROR_CODES, canonicalModelJson, modelHash, sha256Hex } from '../../packages/core/index.js';
 import { createFakeSupabase, SECRET_KEY, PUBLISHABLE_KEY, jsonResponse } from './support/fake-supabase.js';
 
@@ -40,6 +40,15 @@ test('the operator set is closed and separate from the consumer AuthError set', 
     assert.ok(OPERATOR_ERROR_CODES.includes(code));
     assert.ok(!AUTH_ERROR_CODES.includes(code), `${code} must not enter the consumer set`);
   }
+});
+
+test('no operator message claims that nothing changed; outcome_unknown always carries a recovery tag', () => {
+  for (const code of OPERATOR_ERROR_CODES) {
+    const error = code === 'outcome_unknown' ? new OperatorError(code, { recovery: RECOVERY[0] }) : new OperatorError(code);
+    assert.doesNotMatch(error.message, /nothing (was )?changed|unchanged|no change|rolled back/i, code);
+  }
+  assert.throws(() => new OperatorError('outcome_unknown', { stage: 'x' }), TypeError);
+  assert.throws(() => new OperatorError('unavailable', { recovery: 'hope' }), TypeError);
 });
 
 test('construction needs a secret key; a publishable key or garbage is refused without echo', () => {
@@ -98,17 +107,59 @@ test('refusals map to operator codes; unexpected refusals, reads and writes fail
     () => new Promise(() => {}),
   ]) {
     fake.rpc = handler;
-    await rejectsWith(client.revokeManager(args), 'outcome_unknown', (e) => assert.ok(!JSON.stringify(e).includes('READ COMMITTED')));
+    await rejectsWith(client.revokeManager(args), 'outcome_unknown', (e) => {
+      assert.ok(!JSON.stringify(e).includes('READ COMMITTED'));
+      assert.equal(e.details.recovery, 'rerun_same_request_id');
+    });
     await rejectsWith(client.exportModel('studio'), 'unavailable');
   }
+  // A 2xx the client cannot accept may follow a committed write.
   for (const body of [
     { result: 'revoked', user_id: REQ, client_id: 'other', role_key: 'owner' },
     { result: 'granted', user_id: REQ, client_id: 'studio', role_key: 'owner' },
     { result: 'revoked', user_id: REQ, client_id: 'studio' },
   ]) {
     fake.rpc = async () => jsonResponse(200, body);
-    await rejectsWith(client.revokeManager(args), 'unavailable');
+    await rejectsWith(client.revokeManager(args), 'outcome_unknown', (e) => {
+      assert.deepEqual({ ...e.details }, { stage: 'revoke_manager', reason: 'malformed', recovery: 'rerun_same_request_id' });
+    });
   }
+});
+
+test('an accepted write followed by a malformed or lost answer is outcome_unknown with a truthful recovery, never "unchanged"', async () => {
+  const { fake, client } = await setup();
+  const accepted = [];
+  const accept = (answer) => async ({ fn, args }) => {
+    accepted.push(fn);
+    return answer(args);
+  };
+  const register = { clientId: 'studio', displayName: 'Studio', signupPolicy: 'open' };
+  for (const answer of [
+    (args) => jsonResponse(200, { result: 'registered', client_id: args.client_id, state: 'unexpected' }),
+    () => new Response('not json', { status: 200 }),
+    () => { throw new TypeError('lost after commit'); },
+    () => jsonResponse(503, {}),
+  ]) {
+    fake.rpc = accept(answer);
+    await rejectsWith(client.registerClient(register), 'outcome_unknown', (e) => {
+      assert.equal(e.details.stage, 'register_client');
+      assert.equal(e.details.recovery, 'rerun_same_arguments', 'register_client has no request id');
+      assert.doesNotMatch(e.message, /nothing|unchanged/i);
+    });
+  }
+  assert.deepEqual(accepted, Array(4).fill('register_client'), 'each write was sent');
+  // Request-bearing writes: the same id returns the stored result.
+  fake.rpc = accept(() => jsonResponse(200, { result: 'applied', model_hash: 'f'.repeat(64) }));
+  await rejectsWith(client.applyModel(MODEL, { requestId: REQ }), 'outcome_unknown', (e) => {
+    assert.deepEqual({ ...e.details }, { stage: 'apply_model', reason: 'malformed', recovery: 'rerun_same_request_id' });
+  });
+  const target = fake.addUser();
+  fake.rpc = accept(() => jsonResponse(200, { result: 'granted', user_id: target, client_id: 'studio' }));
+  await rejectsWith(client.bootstrapManager({ clientId: 'studio', roleKey: 'owner', requestId: REQ, userId: target }), 'outcome_unknown',
+    (e) => assert.equal(e.details.recovery, 'rerun_same_request_id'));
+  // A dry run writes nothing: its malformed answer is a plain read failure.
+  fake.rpc = async () => jsonResponse(200, { result: 'dry_run' });
+  await rejectsWith(client.applyModel(MODEL, { dryRun: true }), 'unavailable', (e) => assert.equal(e.details.recovery, undefined));
 });
 
 test('apply-model: local validation first, hash parity with core, sanitized refusals and issues', async () => {
@@ -190,6 +241,39 @@ test('L32 bootstrap-manager --email: unique confirmed match after a complete lis
   assert.ok(!noEmailLeak.toLowerCase().includes('target@'));
 });
 
+test('L32 an address that changed between the listing and getUserById is refused with zero RPC writes', async () => {
+  const { fake, client } = await setup();
+  const rpcCalls = [];
+  fake.rpc = async ({ fn, args }) => {
+    rpcCalls.push(fn);
+    return jsonResponse(200, { result: 'granted', user_id: args.user_id, client_id: args.client_id, role_key: args.role_key });
+  };
+  const target = fake.addUser({ email: 'target@example.test' });
+  const args = { clientId: 'studio', roleKey: 'owner', requestId: REQ, email: 'target@example.test' };
+  for (const email of ['other@example.test', 'target@example.test.evil', null]) {
+    // The listing still shows the requested address; the final read does not.
+    fake.hooks.set('admin_get_user', async () => jsonResponse(200, {
+      id: target, email, email_confirmed_at: '2026-01-01T00:00:00Z', is_anonymous: false,
+    }));
+    await rejectsWith(client.bootstrapManager(args), 'unknown_user', (e) => {
+      assert.deepEqual({ ...e.details }, { stage: 'get_user', reason: 'email_changed' });
+      assert.ok(!JSON.stringify(e).includes('example.test'));
+    });
+  }
+  assert.deepEqual(rpcCalls, [], 'no bootstrap_manager write was sent');
+  assert.equal(fake.callsTo('rpc').length, 0);
+  // The same final read with the requested address (any case) grants.
+  fake.hooks.set('admin_get_user', async () => jsonResponse(200, {
+    id: target, email: 'TARGET@example.test', email_confirmed_at: '2026-01-01T00:00:00Z', is_anonymous: false,
+  }));
+  assert.equal((await client.bootstrapManager(args)).result, 'granted');
+  assert.deepEqual(rpcCalls, ['bootstrap_manager']);
+  // --user-id is canonical and needs no address.
+  fake.hooks.set('admin_get_user', async () => jsonResponse(200, { id: target, email: null, email_confirmed_at: '2026-01-01T00:00:00Z' }));
+  const { email: _unused, ...byId } = args;
+  assert.equal((await client.bootstrapManager({ ...byId, userId: target })).result, 'granted');
+});
+
 test('L32 zero, two, unconfirmed-only and capped listings are refused and write nothing', async () => {
   const { fake, client } = await setup();
   fake.rpc = async () => assert.fail('no bootstrap may be attempted');
@@ -260,4 +344,36 @@ test('--invite is explicit: only a complete listing with no such user sends one,
   assert.equal(fake.callsTo('invite').length, 1);
   fake.hooks.set('invite', async () => { throw new TypeError('lost'); });
   await rejectsWith(client.bootstrapManager({ ...args, email: 'other@example.test', invite: true }), 'outcome_unknown');
+});
+
+test('an invite whose answer is lost, unreadable or a 5xx may have been sent: outcome_unknown, and the rerun invites no one twice', async () => {
+  const { fake, client } = await setup();
+  fake.rpc = async () => assert.fail('no bootstrap before the invite is accepted');
+  const args = { clientId: 'studio', roleKey: 'owner', requestId: REQ, invite: true };
+  const answers = [
+    () => { throw new TypeError('lost after sending'); },
+    () => jsonResponse(200, { id: 'not-a-uuid' }),
+    () => new Response('<html>', { status: 200 }),
+    () => jsonResponse(504, {}),
+  ];
+  for (const [index, answer] of answers.entries()) {
+    const email = `accepted-${index}@example.test`;
+    // Auth accepts the invitation, then the answer goes wrong.
+    fake.hooks.set('invite', async ({ body }) => {
+      fake.addUser({ email: body.email, confirmed: false });
+      return answer();
+    });
+    await rejectsWith(client.bootstrapManager({ ...args, email }), 'outcome_unknown', (e) => {
+      assert.equal(e.details.stage, 'invite');
+      assert.equal(e.details.recovery, 'rerun_lookup_before_invite');
+      assert.ok(!JSON.stringify(e).includes('accepted-'));
+    });
+    fake.hooks.clear();
+    const invites = fake.callsTo('invite').length;
+    await rejectsWith(client.bootstrapManager({ ...args, email }), 'email_unverified');
+    assert.equal(fake.callsTo('invite').length, invites, 'the rerun finds the invited address and sends no second invitation');
+  }
+  // Auth's own refusal is not an unknown outcome.
+  fake.hooks.set('invite', async () => jsonResponse(422, { code: 422, error_code: 'email_exists' }));
+  await rejectsWith(client.bootstrapManager({ ...args, email: 'refused@example.test' }), 'unavailable');
 });

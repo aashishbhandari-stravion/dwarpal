@@ -22,6 +22,9 @@ import { installedVersions } from './migrate.js';
 
 const MAX_VIOLATIONS = 200;
 const REDIRECT_ROUTES = ['callback', 'verify', 'reset'];
+// Auth matches allow-list entries as glob patterns; any entry with glob
+// syntax admits more than the exact account routes.
+const GLOB_SYNTAX = /[*?[\]{}\\]/;
 const PROBE_CLIENT = 'auth-kit-doctor-probe';
 
 const CATALOG_SQL = `select jsonb_build_object(
@@ -132,12 +135,15 @@ async function exposedSchemas(ctx) {
   }
 }
 
+// Healthy only with every exact account route and no pattern entry at all
+// (design 9: exact redirect URLs). The report names routes and counts, never
+// the configured URLs.
 async function redirectAllowList(ctx, config) {
   try {
     const { allowList } = await ctx.management.redirectSettings();
     const missing = REDIRECT_ROUTES.filter((route) => !allowList.includes(`${config.origin}${config.routes[route]}`));
-    const wildcards = allowList.filter((entry) => entry.includes('*')).length;
-    return check('redirect_allow_list', 'catalog', missing.length === 0 ? 'ok' : 'fail', { missingRoutes: missing, wildcardEntries: wildcards });
+    const wildcards = allowList.filter((entry) => GLOB_SYNTAX.test(entry)).length;
+    return check('redirect_allow_list', 'catalog', missing.length === 0 && wildcards === 0 ? 'ok' : 'fail', { missingRoutes: missing, wildcardEntries: wildcards });
   } catch (error) {
     return check('redirect_allow_list', 'catalog', 'not_run', failureOf(error));
   }

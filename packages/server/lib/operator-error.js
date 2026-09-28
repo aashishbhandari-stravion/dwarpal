@@ -4,6 +4,10 @@
 // are fixed per code and `details` carries only structural paths, rule
 // names, counts, UUIDs and fixed tags, never peer text, keys, emails or model
 // values.
+//
+// No message claims that nothing changed: a failure after a write was sent
+// cannot know whether it committed. Such a failure is `outcome_unknown` and
+// carries `details.recovery`, one of RECOVERY, naming the safe way to converge.
 
 export const OPERATOR_ERROR_CODES = Object.freeze([
   // shared with the consumer set
@@ -34,12 +38,23 @@ export const OPERATOR_ERROR_CODES = Object.freeze([
   'no_model',
 ]);
 
+export const RECOVERY = Object.freeze([
+  // the same request id returns the stored result or finishes the claimed run
+  'rerun_same_request_id',
+  // register-client is an upsert by client id: the same arguments converge
+  'rerun_same_arguments',
+  // an invitation may have been sent; a rerun invites only an unlisted address
+  'rerun_lookup_before_invite',
+  // migrate reads the installed versions first and applies only what is missing
+  'rerun_migrate',
+]);
+
 const MESSAGES = Object.freeze({
   config_invalid: 'The operator configuration is invalid.',
   model_invalid: 'The permission model is invalid.',
   request_conflict: 'The request id was already used with a different payload.',
   email_unverified: 'The user has not confirmed their e-mail address.',
-  unavailable: 'Supabase could not be reached or answered abnormally; nothing was changed by this step.',
+  unavailable: 'Supabase could not be reached or answered abnormally.',
   invalid_argument: 'The database refused an argument.',
   unknown_client: 'No client with this id is registered.',
   unknown_role: 'The client has no role with this key.',
@@ -50,15 +65,16 @@ const MESSAGES = Object.freeze({
   ambiguous_user: 'More than one confirmed user matches; use --user-id.',
   lookup_incomplete: 'The user listing could not be read completely; use --user-id.',
   request_in_progress: 'Another run with this request id holds the claim; rerun with the same id after it ends.',
-  run_superseded: 'This run was taken over after its lease expired and recorded nothing; rerun with the same id to see the outcome.',
+  run_superseded: 'This run was taken over after its lease expired and the database refused its record; rerun with the same id to see the outcome.',
   lease_expired: 'This run stopped before an admin call because its claim could have expired; rerun with the same id.',
-  outcome_unknown: 'The request was sent but its outcome is unknown; rerun with the same request id.',
+  outcome_unknown: 'A write was sent but its outcome is unknown; it may have been applied.',
   prerequisite_missing: 'A required credential or input is missing.',
-  migration_failed: 'The migration was refused by the database and rolled back.',
+  migration_failed: 'The migration did not complete: the database refused a file, or a check before or after the files failed.',
   no_model: 'The client has no applied model.',
 });
 
 const CODE_SET = new Set(OPERATOR_ERROR_CODES);
+const RECOVERY_SET = new Set(RECOVERY);
 
 export class OperatorError extends Error {
   /**
@@ -67,6 +83,10 @@ export class OperatorError extends Error {
    */
   constructor(code, details) {
     if (!CODE_SET.has(code)) throw new TypeError('OperatorError code must be one of OPERATOR_ERROR_CODES.');
+    const recovery = details?.recovery;
+    if (code === 'outcome_unknown' ? !RECOVERY_SET.has(recovery) : recovery !== undefined && !RECOVERY_SET.has(recovery)) {
+      throw new TypeError('OperatorError recovery must be one of RECOVERY, and outcome_unknown needs one.');
+    }
     super(MESSAGES[code]);
     Object.defineProperties(this, {
       name: { value: 'OperatorError', enumerable: false },
@@ -82,4 +102,9 @@ export class OperatorError extends Error {
 
 export function isOperatorError(value) {
   return value instanceof OperatorError;
+}
+
+/** The error a write step raises when its answer was lost or unreadable. */
+export function outcomeUnknown(stage, reason, recovery) {
+  return new OperatorError('outcome_unknown', { stage, reason, recovery });
 }

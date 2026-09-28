@@ -120,7 +120,8 @@ test('L35(e)(g) crash after the first deletion; in-progress in the lease; two re
       if (deletes === 2) throw new TypeError('crash');
       return undefined;
     });
-    await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: r }), 'unavailable');
+    // The crashed delete may have been applied: its outcome is unknown.
+    await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: r }), 'outcome_unknown');
     let row = await requestRow(db, r);
     assert.equal(row.state, 'pending');
     assert.deepEqual(row.factors_seen, ordered);

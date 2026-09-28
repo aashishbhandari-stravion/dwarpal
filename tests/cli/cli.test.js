@@ -109,6 +109,65 @@ describe('auth-kit executable', () => {
     assert.match(write.stderr, /same --request-id/);
   });
 
+  test('an accepted write whose answer is malformed or lost exits 4 with its own recovery step and never says it is unchanged', async () => {
+    reset();
+    const env = baseEnv(fake);
+    const unchanged = /nothing|unchanged/i;
+    const writes = [];
+    // register-client: the database accepted the upsert, the answer is unreadable.
+    fake.rpc = async ({ fn, args }) => {
+      writes.push(fn);
+      return jsonResponse(200, { result: 'registered', client_id: args.client_id, state: 'unexpected' });
+    };
+    const register = await runCli(['register-client', '--client', 'studio', '--name', 'Studio', '--signup', 'open'], { env });
+    assert.equal(register.code, 4, register.stderr);
+    assert.deepEqual([register.json.error, register.json.details.recovery], ['outcome_unknown', 'rerun_same_arguments']);
+    assert.match(register.stderr, /rerun the same register-client command/);
+    assert.doesNotMatch(register.stdout + register.stderr, unchanged);
+    assert.deepEqual(writes, ['register_client']);
+    // A request-bearing write: the same id converges.
+    fake.rpc = async ({ fn }) => {
+      writes.push(fn);
+      return jsonResponse(200, { result: 'revoked' });
+    };
+    const id = '00000000-0000-4000-8000-0000000000d2';
+    const revoke = await runCli(['revoke-manager', '--client', 'studio', '--role', 'owner', '--user-id', id, '--request-id', id], { env });
+    assert.equal(revoke.code, 4);
+    assert.equal(revoke.json.details.recovery, 'rerun_same_request_id');
+    assert.match(revoke.stderr, /same --request-id/);
+    assert.doesNotMatch(revoke.stdout + revoke.stderr, unchanged);
+    // An invitation Auth sent before the answer was lost.
+    fake.hooks.set('invite', async ({ body }) => {
+      fake.addUser({ email: body.email, confirmed: false });
+      throw new Error('answer lost');
+    });
+    const inviteArgs = ['bootstrap-manager', '--client', 'studio', '--role', 'owner', '--email', 'lost-invite-marker@example.test', '--invite',
+      '--request-id', '00000000-0000-4000-8000-0000000000d3'];
+    const invite = await runCli(inviteArgs, { env, forbidden: ['lost-invite-marker'] });
+    assert.equal(invite.code, 4);
+    assert.equal(invite.json.details.recovery, 'rerun_lookup_before_invite');
+    assert.match(invite.stderr, /invitation may have been sent/);
+    assert.doesNotMatch(invite.stdout + invite.stderr, unchanged);
+    fake.hooks.clear();
+    const again = await runCli(inviteArgs, { env, forbidden: ['lost-invite-marker'] });
+    assert.equal(again.json.error, 'email_unverified', 'the rerun sends no second invitation');
+    assert.equal(fake.callsTo('invite').length, 1);
+    // An MFA factor deletion Auth applied before the answer was lost.
+    const sql = createMemoryMfa();
+    fake.rpc = sql.handle;
+    const user = fake.addUser();
+    fake.addFactor(user);
+    fake.hooks.set('delete_factor', async ({ match }) => {
+      fake.users.get(match[1]).factors.delete(match[2]);
+      throw new Error('answer lost');
+    });
+    const mfa = await runCli(['mfa-reset', '--user-id', user, '--request-id', '00000000-0000-4000-8000-0000000000d4'], { env });
+    assert.equal(mfa.code, 4);
+    assert.deepEqual([mfa.json.details.stage, mfa.json.details.recovery], ['delete_factor', 'rerun_same_request_id']);
+    assert.match(mfa.stderr, /same --request-id/);
+    assert.doesNotMatch(mfa.stdout + mfa.stderr, unchanged);
+  });
+
   test('apply-model: generated request id is printed first; dry run needs none; refusals show positions and ids only', async () => {
     reset();
     const env = baseEnv(fake);

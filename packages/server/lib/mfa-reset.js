@@ -17,9 +17,14 @@
 // stops with lease_expired and the row stays pending with its recorded list.
 // A superseded runner's note and finish are refused by SQL (run_superseded)
 // and surface as that error, never as a stored success.
+//
+// Every claim call is a write, so an unreadable answer to it is
+// outcome_unknown. Once begin may have reserved the claim, every failure
+// carries recovery `rerun_same_request_id`: the rerun returns the stored
+// result or resumes the recorded run, whichever the row holds.
 
 import { UUID_PATTERN } from '../../core/shape.js';
-import { OperatorError } from './operator-error.js';
+import { OperatorError, outcomeUnknown } from './operator-error.js';
 
 export const CLAIM_DEADLINE_MS = 100_000;
 const RESULTS = new Set(['reset', 'no_factors']);
@@ -28,8 +33,17 @@ function isUuidList(value) {
   return Array.isArray(value) && value.length <= 1000 && value.every((id) => typeof id === 'string' && UUID_PATTERN.test(id));
 }
 
+const RECOVERY = 'rerun_same_request_id';
+
 function malformed(stage) {
-  return new OperatorError('unavailable', { stage, reason: 'malformed' });
+  return outcomeUnknown(stage, 'malformed', RECOVERY);
+}
+
+// An unavailable read or refused admin call after begin leaves a pending
+// claim behind; the error says how to resume it.
+function withRecovery(error) {
+  if (!(error instanceof OperatorError) || error.code !== 'unavailable' || error.details.recovery !== undefined) return error;
+  return new OperatorError('unavailable', { ...error.details, recovery: RECOVERY });
 }
 
 function readStoredResult(stage, value) {
@@ -82,7 +96,14 @@ export async function runMfaReset({ userId, requestId }, deps) {
   if (begin.outcome === 'completed') {
     return Object.freeze({ outcome: 'completed', replayed: true, ...begin.result });
   }
+  try {
+    return await runClaimed({ userId, requestId }, deps, begin, beforeAdminCall);
+  } catch (error) {
+    throw withRecovery(error);
+  }
+}
 
+async function runClaimed({ userId, requestId }, deps, begin, beforeAdminCall) {
   let recorded = begin.recorded;
   if (recorded === null) {
     beforeAdminCall('list_factors');
@@ -106,7 +127,7 @@ export async function runMfaReset({ userId, requestId }, deps) {
     await deps.rpcWrite('mfa_reset_finish', { request_id: requestId, run_token: begin.token, factors_deleted: deleted }));
   const sorted = [...recorded].sort();
   if (finished.factorsSeen.length !== sorted.length || finished.factorsSeen.some((id, index) => id !== sorted[index])) {
-    throw new OperatorError('unavailable', { stage: 'mfa_reset_finish', reason: 'inconsistent_result' });
+    throw new OperatorError('unavailable', { stage: 'mfa_reset_finish', reason: 'inconsistent_result', recovery: RECOVERY });
   }
   return Object.freeze({ outcome: begin.outcome, replayed: false, ...finished });
 }

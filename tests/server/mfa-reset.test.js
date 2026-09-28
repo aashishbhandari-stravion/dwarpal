@@ -32,12 +32,19 @@ function runner(ctx) {
   return ctx.request.headers.get('x-runner');
 }
 
-async function rejectsWith(promise, code) {
+async function rejectsWith(promise, code, check) {
   return assert.rejects(promise, (error) => {
     assert.ok(error instanceof OperatorError, `expected OperatorError, got ${error?.name}: ${error?.message}`);
     assert.equal(error.code, code);
+    check?.(error);
     return true;
   });
+}
+
+// After begin, every failure says how to converge: the same request id.
+function sameId(error) {
+  assert.equal(error.details.recovery, 'rerun_same_request_id');
+  assert.doesNotMatch(error.message, /nothing|unchanged/i);
 }
 
 function gate() {
@@ -131,7 +138,8 @@ test('L35(e) crash after the first of two deletions: in-progress inside the leas
     if (deletes === 2) throw new TypeError('crash');
     return undefined;
   });
-  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'unavailable');
+  // The crashed delete may have been applied.
+  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'outcome_unknown', sameId);
   assert.deepEqual(sql.rows.get(R).factorsSeen, ordered);
   assert.equal(sql.rows.get(R).state, 'pending');
   fake.hooks.clear();
@@ -155,7 +163,8 @@ test('L35(f) crash before note: resume with no recorded list lists, notes and co
   const u = fake.addUser();
   const f = fake.addFactor(u);
   fake.hooks.set('list_factors', async () => jsonResponse(503, { msg: 'unavailable' }));
-  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'unavailable');
+  // A failed read, but the claim is reserved: the same id resumes it.
+  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'unavailable', sameId);
   assert.equal(sql.rows.get(R).factorsSeen, null);
   fake.hooks.clear();
   sql.expire(R);
@@ -177,7 +186,8 @@ test('L35(g) two retries just after the lease: one claims and completes, the oth
     if (deletes === 2) throw new TypeError('crash');
     return undefined;
   });
-  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'unavailable');
+  // The crashed delete may have been applied.
+  await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'outcome_unknown', sameId);
   sql.expire(R);
   const hold = gate();
   const entered = gate();
@@ -312,7 +322,8 @@ test('every admin call gets its own 20 s abort deadline, and firing it stops the
     return undefined;
   });
   const { client } = operator('A', { timers: fakeTimers });
-  await rejectsWith(client.mfaReset({ userId: u, requestId: R }), 'unavailable');
+  // The abandoned delete may still have been applied.
+  await rejectsWith(client.mfaReset({ userId: u, requestId: R }), 'outcome_unknown', sameId);
   // One 20 s timer per call (begin, list, note, delete, delete), each separate.
   assert.deepEqual(timers.map((t) => t.ms), [20_000, 20_000, 20_000, 20_000, 20_000]);
   assert.equal(new Set(signals).size, 3);
@@ -368,7 +379,7 @@ test('a lost answer to begin, note or finish is outcome_unknown; the rerun with 
   await rejectsWith(operator('C').client.mfaReset({ userId: 'nope', requestId: R }), 'invalid_argument');
 });
 
-test('malformed claim answers are unavailable and stop before Auth', async () => {
+test('malformed claim answers are outcome_unknown (the claim may be reserved) and stop before Auth', async () => {
   const { fake, operator } = await setup();
   const u = fake.addUser();
   for (const body of [
@@ -379,7 +390,37 @@ test('malformed claim answers are unavailable and stop before Auth', async () =>
     { outcome: 'maybe' },
   ]) {
     fake.rpc = async () => jsonResponse(200, body);
-    await rejectsWith(operator().client.mfaReset({ userId: u, requestId: R }), 'unavailable');
+    await rejectsWith(operator().client.mfaReset({ userId: u, requestId: R }), 'outcome_unknown', (e) => {
+      sameId(e);
+      assert.equal(e.details.stage, 'mfa_reset_begin');
+    });
   }
   assert.equal(fake.adminCalls().length, 0);
+});
+
+test('a factor deletion Auth applied but whose answer was lost, unreadable or a 5xx is outcome_unknown; the same id converges', async () => {
+  for (const answer of [
+    () => { throw new TypeError('lost after delete'); },
+    () => new Response('<html>', { status: 502 }),
+    () => jsonResponse(500, {}),
+  ]) {
+    const { fake, sql, operator } = await setup();
+    const u = fake.addUser();
+    const f = fake.addFactor(u);
+    fake.hooks.set('delete_factor', async ({ match }) => {
+      fake.users.get(match[1]).factors.delete(match[2]);
+      return answer();
+    });
+    await rejectsWith(operator('A').client.mfaReset({ userId: u, requestId: R }), 'outcome_unknown', (e) => {
+      sameId(e);
+      assert.equal(e.details.stage, 'delete_factor');
+    });
+    assert.equal(fake.users.get(u).factors.size, 0, 'Auth applied the deletion');
+    assert.equal(sql.rows.get(R).state, 'pending');
+    fake.hooks.clear();
+    sql.expire(R);
+    const resumed = await operator('B').client.mfaReset({ userId: u, requestId: R });
+    assert.deepEqual([resumed.outcome, resumed.result, [...resumed.factorsDeleted]], ['resume', 'reset', [f]]);
+    assert.equal(sql.events.length, 1);
+  }
 });

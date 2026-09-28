@@ -73,7 +73,10 @@ test('a lost answer after the migration committed is outcome_unknown; the rerun 
       return response;
     };
     fake.management.queries = real.queries;
-    await rejectsWith(client.migrate(), 'outcome_unknown', (e) => assert.equal(e.details.stage, 'migration_20260927000000'));
+    await rejectsWith(client.migrate(), 'outcome_unknown', (e) => {
+      assert.equal(e.details.stage, 'migration_20260927000000');
+      assert.equal(e.details.recovery, 'rerun_migrate');
+    });
     fake.management = real;
     const rerun = await client.migrate();
     assert.deepEqual(rerun.applied, []);
@@ -164,6 +167,7 @@ test('doctor catches drift: widened column grant, extra policy, orphan membershi
     assert.equal(checks.model_drift.status, 'fail');
     assert.equal(checks.model_drift.appliedMatchesDatabase, false);
     assert.equal(checks.model_drift.fileMatchesDatabase, false);
+    assert.equal(checks.redirect_allow_list.status, 'fail');
     assert.deepEqual(checks.redirect_allow_list.missingRoutes, ['verify', 'reset']);
     assert.equal(checks.redirect_allow_list.wildcardEntries, 1);
     assert.equal(checks.exposed_schemas.privateSchemaExposed, true);

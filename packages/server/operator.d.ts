@@ -27,6 +27,13 @@ export type OperatorErrorCode =
   | 'no_model';
 
 export declare const OPERATOR_ERROR_CODES: readonly OperatorErrorCode[];
+
+/**
+ * How to converge after a write whose outcome is unknown (always present on
+ * `outcome_unknown`, and on an MFA reset failure that left its claim pending).
+ */
+export type RecoveryTag = 'rerun_same_request_id' | 'rerun_same_arguments' | 'rerun_lookup_before_invite' | 'rerun_migrate';
+export declare const RECOVERY: readonly RecoveryTag[];
 export declare const ADMIN_CALL_TIMEOUT_MS: 20000;
 
 export interface ModelRefusalDetail {
@@ -41,6 +48,7 @@ export interface ModelRefusalDetail {
 export interface OperatorErrorDetails {
   readonly stage?: string;
   readonly reason?: string;
+  readonly recovery?: RecoveryTag;
   readonly issues?: readonly ValidationIssue[];
   readonly refusals?: readonly ModelRefusalDetail[];
   readonly [field: string]: unknown;

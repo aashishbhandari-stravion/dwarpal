@@ -11,10 +11,13 @@
 // e-mail argument, so none of them can be printed even by mistake.
 //
 // Exit status (closed set):
-//   0  done                     3  unavailable (nothing changed by the failed step)
-//   1  refused / not completed  4  outcome unknown: rerun with the same request id
-//   2  usage or input error     5  prerequisite missing, or doctor incomplete
-//   70 internal error
+//   0  done                     3  unavailable: Supabase unreachable or abnormal
+//   1  refused / not completed  4  outcome unknown: a write may have been applied;
+//   2  usage or input error        follow the printed recovery step
+//   70 internal error           5  prerequisite missing, or doctor incomplete
+//
+// No failure is reported as "nothing changed": when a write may have been
+// applied, the note names the step that converges for that command.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -65,15 +68,24 @@ const SPECS = {
   'mfa-reset': { 'user-id': 'value', 'request-id': 'value' },
 };
 
+// Fixed recovery notes, keyed by the error's `details.recovery` tag; they
+// take precedence over the per-code hints below.
+const RECOVERY_HINTS = {
+  rerun_same_request_id: 'rerun the same command with the same --request-id; it returns the stored result if the request completed and otherwise carries it out.',
+  rerun_same_arguments: 'the client may have been registered or updated; rerun the same register-client command, which converges and reports the registration.',
+  rerun_lookup_before_invite: 'an invitation may have been sent; rerun the same command, which invites only when Auth does not list the address.',
+  rerun_migrate: 'a migration may have been applied; rerun migrate, which reads the installed versions first and applies only what is missing.',
+};
+
 // Fixed hints printed after an error, keyed by code.
 const HINTS = {
   lookup_incomplete: 'find the user id in the Supabase dashboard and rerun with --user-id.',
   ambiguous_user: 'rerun with --user-id.',
-  outcome_unknown: 'rerun the same command with the same --request-id; a completed request returns its stored result.',
   request_in_progress: 'rerun with the same --request-id after the other run ends (the claim lasts 120 seconds).',
   lease_expired: 'rerun with the same --request-id; the run resumes with the recorded factor list.',
   run_superseded: 'rerun with the same --request-id to see the outcome.',
   prerequisite_missing: 'see `auth-kit --help` for the required environment.',
+  migration_failed: 'earlier files may be installed; run `auth-kit doctor` to see the installed versions and grants before retrying.',
 };
 
 function exitFor(code) {
@@ -339,7 +351,9 @@ export async function main(argv, io) {
     if (isOperatorError(error)) {
       out.json({ error: error.code, message: error.message, details: error.details });
       out.note(`${error.code}: ${error.message}`);
-      if (Object.hasOwn(HINTS, error.code)) out.note(HINTS[error.code]);
+      const recovery = error.details.recovery;
+      if (typeof recovery === 'string' && Object.hasOwn(RECOVERY_HINTS, recovery)) out.note(RECOVERY_HINTS[recovery]);
+      else if (Object.hasOwn(HINTS, error.code)) out.note(HINTS[error.code]);
       return exitFor(error.code);
     }
     // Unexpected: say so without the error's text, which could carry input.

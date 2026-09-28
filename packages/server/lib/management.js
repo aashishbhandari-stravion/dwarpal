@@ -9,7 +9,7 @@
 // is `sql_error`.
 
 import { request, parseJson, tryParseJson, TransportError } from './http.js';
-import { OperatorError } from './operator-error.js';
+import { OperatorError, outcomeUnknown } from './operator-error.js';
 
 const MAX_BYTES = 16 * 1024 * 1024;
 const REF_PATTERN = /^[a-z0-9]{1,64}$/;
@@ -44,7 +44,8 @@ export function createManagementApi({ fetch: fetchImpl, timers, baseUrl, token, 
   if (!REF_PATTERN.test(projectRef)) throw new OperatorError('config_invalid', { issues: [{ path: 'projectRef', rule: 'syntax' }] });
   const base = `${baseUrl}/v1/projects/${projectRef}`;
 
-  async function call(stage, method, path, { body, uncertain = false, callTimeoutMs = timeoutMs } = {}) {
+  // Only migration files are sent as writes; migrate converges on a rerun.
+  async function call(stage, method, path, { body, write = false, callTimeoutMs = timeoutMs } = {}) {
     try {
       return await request(fetchImpl, `${base}${path}`, {
         method,
@@ -60,7 +61,8 @@ export function createManagementApi({ fetch: fetchImpl, timers, baseUrl, token, 
       });
     } catch (error) {
       if (!(error instanceof TransportError)) throw error;
-      throw new OperatorError(uncertain ? 'outcome_unknown' : 'unavailable', { stage, reason: error.reason });
+      if (write) throw outcomeUnknown(stage, error.reason, 'rerun_migrate');
+      throw new OperatorError('unavailable', { stage, reason: error.reason });
     }
   }
 
@@ -75,14 +77,24 @@ export function createManagementApi({ fetch: fetchImpl, timers, baseUrl, token, 
   return Object.freeze({
     /**
      * Runs SQL and returns the rows of its last statement. A 4xx answer is a
-     * refused statement (the query ran and rolled back); a 5xx or transport
-     * fault after sending a write leaves the outcome unknown.
+     * refused statement (the query ran and rolled back); a 5xx, a transport
+     * fault or an unreadable success after sending a write leaves the outcome
+     * unknown.
      */
     async query(sql, { stage, write = false, callTimeoutMs } = {}) {
-      const response = await call(stage, 'POST', '/database/query', { body: { query: sql }, uncertain: write, callTimeoutMs });
+      const response = await call(stage, 'POST', '/database/query', { body: { query: sql }, write, callTimeoutMs });
       if (response.status === 200 || response.status === 201) {
-        const rows = readJson(stage, response);
-        if (!Array.isArray(rows)) throw new OperatorError('unavailable', { stage, reason: 'malformed' });
+        let rows;
+        try {
+          rows = readJson(stage, response);
+        } catch (error) {
+          if (write) throw outcomeUnknown(stage, 'malformed', 'rerun_migrate');
+          throw error;
+        }
+        if (!Array.isArray(rows)) {
+          if (write) throw outcomeUnknown(stage, 'malformed', 'rerun_migrate');
+          throw new OperatorError('unavailable', { stage, reason: 'malformed' });
+        }
         return rows;
       }
       if (response.status === 401 || response.status === 403) {
@@ -92,7 +104,7 @@ export function createManagementApi({ fetch: fetchImpl, timers, baseUrl, token, 
         throw new OperatorError(write ? 'migration_failed' : 'unavailable', { stage, reason: failureTag(response) });
       }
       const reason = `http_${response.status}`;
-      if (response.status >= 500) throw new OperatorError(write ? 'outcome_unknown' : 'unavailable', { stage, reason });
+      if (response.status >= 500 && write) throw outcomeUnknown(stage, reason, 'rerun_migrate');
       throw new OperatorError('unavailable', { stage, reason });
     },
 
