@@ -1518,9 +1518,12 @@ begin
   end if;
   perform auth_kit_private.confirmed_user(p_user_id);
   v_inserted := auth_kit_private.insert_membership(p_user_id, p_client_id, p_role_key, null, 'operator');
+  -- Every successful bootstrap makes the client live, including one that finds
+  -- the membership already present (placed by the SQL editor, say): from here
+  -- on a model change may not leave the client without an assigned manager.
+  update auth_kit_private.clients c set state = 'live'
+   where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id and c.state = 'registered';
   if v_inserted then
-    update auth_kit_private.clients c set state = 'live'
-     where c.client_digest = auth_kit_private.key_digest(p_client_id) and c.client_id = p_client_id and c.state = 'registered';
     insert into auth_kit_private.membership_events (request_id, payload_hash, result, action, user_id, client_id, role_key, actor_user_id, actor_kind)
     values (p_request_id, v_hash, 'granted', 'bootstrap', p_user_id, p_client_id, p_role_key, null, 'operator');
   end if;

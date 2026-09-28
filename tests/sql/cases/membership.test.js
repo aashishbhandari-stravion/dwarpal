@@ -119,6 +119,64 @@ test('bootstrap_manager: operator only, sets live on first success, refuses unkn
   }
 }));
 
+test('bootstrap that finds an existing manager membership still makes the client live, so the last manager is protected', () => withDatabase(async (db) => {
+  await register(db, 'studio');
+  await applyModel(db, 'studio', exampleModel('studio'));
+  const clientState = () => db.admin.value("select state from auth_kit_private.clients where client_id = 'studio'");
+  const user = await db.createUser();
+  // Placed by an operator in the SQL editor, before any bootstrap.
+  await db.as({ role: 'postgres' }, `insert into auth_kit_private.memberships (user_id, client_id, role_key, granted_via)
+                                      values (${lit(user)}, 'studio', 'steward', 'operator')`);
+  assert.equal(await clientState(), 'registered');
+  const id = uuid();
+  const result = await bootstrap(db, user, 'studio', 'steward', id);
+  assert.deepEqual(result, { result: 'already_member', user_id: user, client_id: 'studio', role_key: 'steward' });
+  assert.equal(await clientState(), 'live');
+  assert.equal(await db.count('auth_kit_private.memberships', `user_id = '${user}'`), 1);
+  assert.deepEqual(await events(db), [], 'no event for a membership that already existed');
+  assert.deepEqual((await requestRow(db, id)).result, result);
+  const after = await snapshot(db);
+  assert.deepEqual(await bootstrap(db, user, 'studio', 'steward', id), result);
+  await refusal(bootstrap(db, user, 'studio', 'owner', id), 'request_conflict');
+  assert.deepEqual(await snapshot(db), after, 'replay and conflict write nothing');
+
+  // steward is the only assigned manager role; owner is a manager role nobody holds.
+  const demoted = exampleModel('studio');
+  demoted.roles.steward.manages_members = false;
+  const removed = exampleModel('studio');
+  delete removed.roles.steward;
+  for (const model of [demoted, removed]) {
+    const error = await refusal(applyModel(db, 'studio', model), 'model_refused');
+    assert.ok(JSON.parse(error.detail).refusals.some((r) => r.rule === 'no_manager_would_remain'), error.detail);
+  }
+  await refusal(revokeManager(db, user, 'studio', 'steward'), 'last_manager');
+  assert.deepEqual(await snapshot(db), after);
+}));
+
+test('the live transition of a no-op bootstrap rolls back with the call and is taken by its retry', () => withDatabase(async (db) => {
+  await db.installFaults();
+  await register(db, 'studio');
+  await applyModel(db, 'studio', exampleModel('studio'));
+  const user = await db.createUser();
+  await db.as({ role: 'postgres' }, `insert into auth_kit_private.memberships (user_id, client_id, role_key, granted_via)
+                                      values (${lit(user)}, 'studio', 'steward', 'operator')`);
+  const before = await snapshot(db);
+  const id = uuid();
+  for (const table of ['clients', 'request_log']) {
+    const error = await dbError(db.call(actors.service(), 'auth_kit.bootstrap_manager', { user_id: user, client_id: 'studio', role_key: 'steward', request_id: id },
+      { settings: [['dwarpal_test.fail_on', table]] }), 'DT001');
+    assert.match(error.message, new RegExp(table));
+    assert.deepEqual(await snapshot(db), before, table);
+  }
+  assert.equal((await bootstrap(db, user, 'studio', 'steward', id)).result, 'already_member');
+  assert.equal(await db.admin.value("select state from auth_kit_private.clients where client_id = 'studio'"), 'live');
+  // Refusals leave a registered client registered.
+  await register(db, 'other');
+  await applyModel(db, 'other', exampleModel('other'));
+  await refusal(bootstrap(db, user, 'other', 'editor'), 'not_manager_role');
+  assert.equal(await db.admin.value("select state from auth_kit_private.clients where client_id = 'other'"), 'registered');
+}));
+
 test('revoke_manager: never the last manager membership; not_member when absent; one event when revoked', () => withDatabase(async (db) => {
   const steward = await studio(db);
   const before = await snapshot(db);
