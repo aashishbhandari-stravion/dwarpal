@@ -8,5 +8,10 @@
     "skipLibCheck": false,
     "types": []
   },
-  "include": ["packages/core/**/*.d.ts", "tests/core/types/**/*.ts"]
+  "include": [
+    "packages/core/**/*.d.ts",
+    "packages/server/**/*.d.ts",
+    "tests/core/types/**/*.ts",
+    "tests/server/types/**/*.ts"
+  ]
 }

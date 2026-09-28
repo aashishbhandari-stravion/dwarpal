@@ -2,7 +2,7 @@
   "name": "@briqvent/dwarpal",
   "version": "0.0.0",
   "private": true,
-  "description": "Authentication and role-based access kit for Supabase Auth: pure core contract, validators and permission evaluation.",
+  "description": "Authentication and role-based access kit for Supabase Auth: pure core contract, validators and permission evaluation, a stateless Node server library and the auth-kit operator CLI.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -18,19 +18,49 @@
       "types": "./packages/core/testing/index.d.ts",
       "default": "./packages/core/testing/index.js"
     },
+    "./server": {
+      "types": "./packages/server/index.d.ts",
+      "default": "./packages/server/index.js"
+    },
+    "./server/operator": {
+      "types": "./packages/server/operator.d.ts",
+      "default": "./packages/server/operator.js"
+    },
+    "./server/hono": {
+      "types": "./packages/server/hono.d.ts",
+      "default": "./packages/server/hono.js"
+    },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "auth-kit": "packages/server/cli/auth-kit.js"
   },
   "files": [
     "packages/core/**/*.js",
-    "packages/core/**/*.d.ts"
+    "packages/core/**/*.d.ts",
+    "packages/server/**/*.js",
+    "packages/server/**/*.d.ts"
   ],
   "scripts": {
-    "test": "node --test \"tests/core/**/*.test.js\"",
+    "test": "node --test \"tests/core/**/*.test.js\" \"tests/server/*.test.js\" \"tests/cli/cli.test.js\"",
+    "test:sql-server": "node tests/sql/run.js tests/server/sql/manager.test.js tests/server/sql/mfa-reset.test.js tests/server/sql/operator.test.js tests/server/sql/catalog.test.js tests/cli/sql-flow.test.js",
     "check:types": "tsc -p tsconfig.json",
     "check:package": "node scripts/check-package.mjs",
     "check": "npm test && npm run check:types && npm run check:package"
   },
+  "dependencies": {
+    "jose": "6.2.12"
+  },
+  "peerDependencies": {
+    "hono": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "hono": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "hono": "4.13.9",
     "typescript": "5.9.3"
   }
 }
