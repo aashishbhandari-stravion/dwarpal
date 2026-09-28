@@ -2,7 +2,7 @@
 
 `@briqvent/dwarpal` is an authentication and authorization kit for websites built on **Supabase Auth**. Its planned scope is a complete sign-in system and client-defined role-based access control for static or server-rendered sites with an optional Node.js back end, without running an auth service of its own.
 
-> **Status:** pre-release, not published to npm. The implemented package currently contains the pure core at contract 0.5. SQL migrations, the server library, browser kit, emulator, CLI and examples are planned; they are not available in this checkout yet.
+> **Status:** pre-release, not published to npm. The implemented package contains the pure core at contract 0.5. This checkout also includes the SQL migration and local PostgreSQL verification harness. The server library, browser kit, emulator, CLI and examples remain planned. Hosted Supabase verification and packaged SQL delivery are still pending.
 
 ## Planned full kit
 
@@ -65,15 +65,17 @@ npm run check         # all of the above
 
 TypeScript (`typescript`, pinned) is the only development dependency. The package has no runtime dependencies.
 
+The [SQL gates](tests/sql/README.md) exercise the migration on disposable local PostgreSQL clusters, including grants, row policies, retries, concurrency and failure recovery. They require separate PostgreSQL binaries; `npm test` runs the core suite only. Local SQL checks do not establish hosted PostgREST or live Supabase Auth behavior.
+
 ## Documentation
 
-These documents describe the frozen design for the complete kit. The implemented core and its local checks are described above.
+These documents describe the design for the complete kit. The implemented core and SQL checks are described above; implementation notes in the Markdown design documents clarify the physical SQL representation.
 
 - [User manual](docs/manual.md): concepts, rules of engagement, integration steps, server and browser usage, errors, operations.
 - [Design](docs/design.md): contract 0.5, the `Principal` shape, the server and SQL surfaces, security decisions and the test plan.
 - [RBAC low-level design](docs/rbac-lld.md): the data model, invariants, sequence diagrams and failure modes.
 
-PDF editions for offline reading: [manual](docs/pdf/manual.pdf), [design](docs/pdf/design.pdf), [RBAC low-level design](docs/pdf/rbac-lld.pdf). The Markdown files are the source; the PDFs are generated from them.
+PDF editions for offline reading: [manual](docs/pdf/manual.pdf), [design](docs/pdf/design.pdf), [RBAC low-level design](docs/pdf/rbac-lld.pdf). These retain the original design snapshots; the Markdown files include subsequent implementation notes.
 
 ## Licence
 

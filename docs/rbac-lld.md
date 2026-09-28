@@ -67,6 +67,8 @@ The limits of the RBAC design are deliberate:
 
 ## 3. Data model
 
+This diagram shows logical keys. The SQL implementation uses generated SHA-256 digest columns for primary and foreign keys involving opaque client, role and permission strings, with exact-text lookups and reference checks. Collisions refuse writes. See the [SQL table implementation note](design.md#tables) for physical columns and direct-write conflict handling; these details do not change logical model exports.
+
 ```mermaid
 erDiagram
     clients ||--o{ roles : defines

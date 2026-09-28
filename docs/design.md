@@ -194,6 +194,10 @@ Wrappers validate argument shapes and call the private implementation. Implement
 
 #### Tables
 
+The keys below describe logical identity. The SQL migration indexes opaque client, role and permission strings through generated, stored SHA-256 `bytea` columns (`client_digest`, `role_digest`, `permission_digest`) to avoid PostgreSQL's B-tree entry-size limit for long valid strings. Primary and foreign keys involving these strings use their digest columns; UUID keys remain UUIDs. Lookups and reference checks still compare the exact original text. A digest collision refuses the write rather than treating distinct strings as the same key.
+
+Direct SQL writes supply the logical text columns and leave generated digest columns to PostgreSQL. Handwritten `ON CONFLICT` targets must match the physical constraint, such as `(client_digest, role_digest)` for `roles`, rather than the logical text columns shown below. A conflict alone does not prove exact-text equality; custom recovery SQL must check the stored text before treating a conflict as a retry or updating that row. Model exports retain the original strings.
+
 In `auth_kit_private`:
 
 - `clients(client_id PK, display_name, signup_policy open|closed, state registered|live, created_at)`. `state` becomes `live` on the first successful `bootstrap_manager` and never returns to `registered`.
