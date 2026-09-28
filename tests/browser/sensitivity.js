@@ -93,14 +93,20 @@ const MUTATIONS = [
   {
     id: 'signout-local-clear',
     guard: 'sign-out clears local state even when Auth fails',
-    edits: [['packages/browser/controller.js', "const local = this.#clearLocal() ? 'cleared' : 'failed';", "const local = remote !== 'unconfirmed' && this.#clearLocal() ? 'cleared' : 'failed';"]],
+    edits: [['packages/browser/controller.js', 'let cleared = this.#clearLocal();', "let cleared = remote !== 'unconfirmed' && this.#clearLocal();"]],
     test: ['tests/browser/signout.test.js', 'unreachable, errors or hangs'],
   },
   {
-    id: 'signout-late-session',
-    guard: 'a sign-in answer that arrives after sign-out is wiped',
-    edits: [['packages/browser/controller.js', 'if (this.#hasStoredSession() && !this.#clearLocal() && epoch === this.#epoch) {', 'if (false) {']],
-    test: ['tests/browser/signout.test.js', 'running sign-in wins'],
+    id: 'signout-late-revoke',
+    guard: 'a session saved by an action that finishes after sign-out began is revoked globally',
+    edits: [['packages/browser/controller.js', 'remote = await this.#revokeStoredSession(remote);', '']],
+    test: ['tests/browser/signout.test.js', 'A1: a sign-in that succeeds after sign-out began'],
+  },
+  {
+    id: 'signout-late-unconfirmed',
+    guard: 'an unconfirmed late revocation is reported as unconfirmed',
+    edits: [['packages/browser/controller.js', "return result.failure || previous === 'unconfirmed' ? 'unconfirmed' : 'revoked';", "return previous === 'unconfirmed' ? 'unconfirmed' : 'revoked';"]],
+    test: ['tests/browser/signout.test.js', 'A1: when the late session cannot be revoked'],
   },
   {
     id: 'mfa-aal2',

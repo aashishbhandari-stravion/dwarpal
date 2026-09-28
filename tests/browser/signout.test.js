@@ -55,30 +55,61 @@ test('a storage that refuses removal is reported as a failed local clear, never 
   tab.localStorage.failRemove = false;
 });
 
-test('sign-out during a running sign-in wins: the late session is wiped and the page stays signed out', async () => {
+// Holds the password sign-in request until `release()`, so sign-out can
+// start while that action is in flight.
+async function heldSignIn({ password = 'correct horse battery', beforeRelease = () => {} } = {}) {
   const fixture = createScriptedSupabase();
   fixture.seedClient({ clientId: CLIENT_ID, roles: MODEL_ROLES });
   fixture.seedUser({ email: 'late@example.test' });
   const { tab } = await setup('/account/sign-in', { fixture, start: false });
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const slowFetch = fixture.fetch;
+  const direct = fixture.fetch;
   fixture.fetch = async (input, init) => {
     if (String(input).includes('grant_type=password')) await gate;
-    return slowFetch(input, init);
+    return direct(input, init);
   };
-  const late = openController(tab, fixture);
-  await late.start();
-  const signingIn = late.signIn({ email: 'late@example.test', password: 'correct horse battery' });
-  const signingOut = late.signOut();
-  // Signed out already; a new action is refused until the running one ends.
-  assert.equal((await late.signIn({ email: 'late@example.test', password: 'other' })).state, 'idle');
+  const controller = openController(tab, fixture);
+  await controller.start();
+  const signingIn = controller.signIn({ email: 'late@example.test', password });
+  const signingOut = controller.signOut();
+  // No result is claimed and no new action runs until the sign-in has ended.
+  assert.equal((await controller.signIn({ email: 'late@example.test', password: 'other' })).state, 'submitting');
+  beforeRelease(fixture);
   release();
   const [inView, outView] = await Promise.all([signingIn, signingOut]);
-  assert.equal(outView.state, 'idle');
-  assert.equal(late.getView().state, 'idle', 'the late sign-in result was dropped');
+  return { fixture, tab, controller, inView, outView };
+}
+
+test('A1: a sign-in that succeeds after sign-out began is revoked globally and cleared locally', async () => {
+  const { fixture, tab, controller, inView, outView } = await heldSignIn();
+  assert.deepEqual(outView.signOut, { remote: 'revoked', local: 'cleared' });
+  assert.equal(fixture.count('global_sign_out'), 1, 'the late session is revoked with scope global');
+  assert.equal(fixture.snapshot().liveSessions, 0, 'no remote session survives');
+  assert.deepEqual(kitKeys(tab), []);
   assert.notEqual(inView.state, 'signed_in');
-  assert.deepEqual(kitKeys(tab), [], 'the session saved by the late answer was wiped');
+  assert.equal(controller.getView().state, 'idle');
   assert.equal(fixture.count('ensure_profile'), 0);
   assert.equal(fixture.count('password_sign_in'), 1, 'the action tried during sign-out sent nothing');
+});
+
+test('A1: when the late session cannot be revoked, the remote half is unconfirmed and local state is still cleared', async () => {
+  for (const mode of ['transport_loss', 'http_503']) {
+    // The first phase found no stored session and asked Auth nothing, so this
+    // one-shot fault hits the revocation of the late session.
+    const { fixture, tab, outView } = await heldSignIn({ beforeRelease: (f) => f.fault('global_sign_out', mode) });
+    assert.deepEqual(outView.signOut, { remote: 'unconfirmed', local: 'cleared' }, mode);
+    assert.equal(fixture.count('global_sign_out'), 1, mode);
+    assert.equal(fixture.snapshot().liveSessions, 1, `${mode}: the server session is still live, as reported`);
+    assert.deepEqual(kitKeys(tab), [], mode);
+    const later = openController(reopen(tab, '/account/sign-in'), fixture);
+    assert.deepEqual([(await later.start()).state, later.getPrincipal()], ['idle', null], `${mode}: nothing resumes locally`);
+  }
+});
+
+test('a sign-in that fails after sign-out began leaves nothing to revoke: skipped, no Auth call', async () => {
+  const { fixture, tab, outView } = await heldSignIn({ password: 'wrong password' });
+  assert.deepEqual(outView.signOut, { remote: 'skipped', local: 'cleared' });
+  assert.equal(fixture.count('global_sign_out'), 0);
+  assert.deepEqual(kitKeys(tab), []);
 });

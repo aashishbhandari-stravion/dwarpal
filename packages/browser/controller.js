@@ -334,7 +334,10 @@ class AuthController {
 
   /**
    * Global sign-out. Local session, flow and marker state is cleared whether
-   * or not Auth could be reached; the view reports both halves.
+   * or not Auth could be reached; the view reports both halves. The result is
+   * published only once any action that was running has finished: a session
+   * that action saved late is revoked globally too before the final clear, so
+   * `revoked` and `skipped` are never claimed while a session may be live.
    */
   async signOut() {
     this.#epoch += 1;
@@ -343,30 +346,36 @@ class AuthController {
     this.#signingOut = true;
     try {
       this.#show(epoch, { screen: 'signOut', state: 'submitting' });
-      let remote = 'skipped';
-      if (this.#hasStoredSession()) {
-        const result = await authCall(() => this.#client.auth.signOut({ scope: 'global' }));
-        remote = result.failure ? 'unconfirmed' : 'revoked';
-      }
-      const local = this.#clearLocal() ? 'cleared' : 'failed';
-      this.#staleSession = local === 'failed';
-      this.#show(epoch, { screen: 'signOut', state: 'idle', signOut: { remote, local } });
+      let remote = await this.#revokeStoredSession('skipped');
+      let cleared = this.#clearLocal();
       // An action that was running may still save a session when its answer
-      // arrives; wait for it and clear again. New actions wait meanwhile.
+      // arrives. New actions stay out until it has finished and any session
+      // it saved has been revoked and cleared.
       const running = this.#inFlight;
       if (running) {
         await running.catch(() => {});
-        if (this.#hasStoredSession() && !this.#clearLocal() && epoch === this.#epoch) {
-          this.#show(epoch, { screen: 'signOut', state: 'idle', signOut: { remote, local: 'failed' } });
+        if (this.#hasStoredSession()) {
+          remote = await this.#revokeStoredSession(remote);
+          cleared = this.#clearLocal() && cleared;
         }
       }
-      return this.#view;
+      const local = cleared ? 'cleared' : 'failed';
+      this.#staleSession = !cleared;
+      return this.#show(epoch, { screen: 'signOut', state: 'idle', signOut: { remote, local } });
     } catch (error) {
       if (error instanceof Superseded) return this.#view;
       throw error;
     } finally {
       if (epoch === this.#epoch) this.#signingOut = false;
     }
+  }
+
+  // Asks Auth to revoke the stored session everywhere. `previous` is the
+  // outcome so far: once any revocation is unconfirmed, the result stays so.
+  async #revokeStoredSession(previous) {
+    if (!this.#hasStoredSession()) return previous;
+    const result = await authCall(() => this.#client.auth.signOut({ scope: 'global' }));
+    return result.failure || previous === 'unconfirmed' ? 'unconfirmed' : 'revoked';
   }
 
   // ---- internals -------------------------------------------------------
