@@ -1,0 +1,28 @@
+{
+  "client": "rls-demo",
+  "roles": {
+    "manager": {
+      "description": "manages people; needs an MFA-verified session",
+      "manages_members": true,
+      "mfa_required": true,
+      "permissions": ["members:manage", "notes:read:any", "notes:write:any"]
+    },
+    "staff": {
+      "description": "works every note; needs an MFA-verified session",
+      "mfa_required": true,
+      "permissions": ["notes:read:any", "notes:write:any"]
+    },
+    "member": {
+      "description": "granted automatically at first sign-in",
+      "self_assignable": true,
+      "permissions": ["notes:read:own", "notes:write:own"]
+    }
+  },
+  "permissions": {
+    "members:manage": "grant and revoke non-manager roles",
+    "notes:read:own": "read notes the user owns",
+    "notes:read:any": "read any note",
+    "notes:write:own": "create, change and delete notes the user owns",
+    "notes:write:any": "create, change and delete any note"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "clientId": "creditone",
+  "supabaseUrl": "https://your-project-ref.supabase.co",
+  "publishableKey": "sb_publishable_replace-me",
+  "origin": "https://www.example.com",
+  "allowedReturnPaths": [
+    "/",
+    "/orders",
+    "/documents"
+  ],
+  "defaultReturnPath": "/",
+  "providers": {
+    "email": true,
+    "google": true
+  },
+  "brand": {
+    "name": "CREDITONE",
+    "colors": {
+      "primary": "#0b5cad",
+      "onPrimary": "#ffffff",
+      "text": "#1b1d22",
+      "muted": "#5b6070",
+      "surface": "#ffffff",
+      "border": "#d5d8e0",
+      "danger": "#b3261e"
+    },
+    "fontStack": "system-ui, sans-serif"
+  },
+  "selfSignup": true
+}

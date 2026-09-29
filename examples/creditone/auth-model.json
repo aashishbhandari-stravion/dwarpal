@@ -1,0 +1,76 @@
+{
+  "client": "creditone",
+  "roles": {
+    "admin": {
+      "manages_members": true,
+      "mfa_required": true,
+      "permissions": [
+        "members:manage",
+        "orders:read:any",
+        "orders:create:any",
+        "orders:update:any",
+        "orders:cancel:any",
+        "orders:reopen:any",
+        "orders:grant:any",
+        "documents:upload:any",
+        "documents:download:any",
+        "documents:review:any",
+        "leads:read:any",
+        "leads:create:any",
+        "leads:update:any",
+        "leads:assign:self",
+        "leads:assign:any",
+        "leads:convert:any",
+        "contacts:update:any"
+      ]
+    },
+    "staff": {
+      "mfa_required": true,
+      "permissions": [
+        "orders:read:any",
+        "orders:create:any",
+        "orders:update:any",
+        "orders:cancel:any",
+        "orders:grant:any",
+        "documents:upload:any",
+        "documents:download:any",
+        "documents:review:any",
+        "leads:read:any",
+        "leads:create:any",
+        "leads:update:any",
+        "leads:assign:self",
+        "leads:convert:any"
+      ]
+    },
+    "customer": {
+      "self_assignable": true,
+      "permissions": [
+        "orders:read:own",
+        "documents:upload:own",
+        "documents:download:own"
+      ]
+    }
+  },
+  "permissions": {
+    "members:manage": "grant and revoke non-manager roles",
+    "orders:read:own": "read orders the user is linked to; the link is the orders service's audited grant row",
+    "orders:read:any": "read any order",
+    "orders:create:any": "create an order directly (staff intake) or by lead conversion",
+    "orders:update:any": "ordinary workflow actions, notes, milestones",
+    "orders:cancel:any": "cancel an order",
+    "orders:reopen:any": "reopen a closed order (admin only)",
+    "orders:grant:any": "link or unlink a customer to an order",
+    "documents:upload:own": "upload to an order the user is linked to",
+    "documents:upload:any": "upload on a customer's behalf (walk-in paper)",
+    "documents:download:own": "download documents of an order the user is linked to",
+    "documents:download:any": "download any document",
+    "documents:review:any": "add or waive requirements, review versions",
+    "leads:read:any": "list, detail, search",
+    "leads:create:any": "staff manual lead creation",
+    "leads:update:any": "stage changes, notes",
+    "leads:assign:self": "assign a lead to oneself: the target assignee must equal the principal's user id (`:self`)",
+    "leads:assign:any": "assign a lead to any member",
+    "leads:convert:any": "convert to order and cancel conversion",
+    "contacts:update:any": "edit a contact's personal details"
+  }
+}

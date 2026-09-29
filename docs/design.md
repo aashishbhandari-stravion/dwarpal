@@ -2,7 +2,7 @@
 
 This is the design of `@briqvent/dwarpal`, contract version **0.5**. It describes what the package does, the guarantees it makes and the rules an integration must follow. For step-by-step integration read the [user manual](manual.md). For the SQL design, sequence diagrams and failure analysis read the [RBAC low-level design](rbac-lld.md).
 
-Status: the design is frozen at contract 0.5. The package is not released yet and nothing is published to npm. Where this document and the released code disagree, the released code and its changelog take precedence.
+Status: the design is frozen at contract 0.5. The package is private (`0.0.0`) and nothing is published to npm. The core, SQL, server library, CLI, browser kit, development emulator, examples and package are implemented and verified **locally** (unit tests, a real local PostgreSQL, Chromium against a synthetic fixture, a clean packed install). No hosted Supabase project, real mail, Google or authenticator run has happened, and the CREDITONE acceptance and the release are not done; section 8 keeps the evidence classes apart. Where this document and the code disagree, the code and its changelog take precedence; the PDF editions under `docs/pdf/` are the original design snapshots and are not updated.
 
 ## 1. Purpose and scope
 
@@ -51,18 +51,25 @@ packages/core/        pure JS: contract types, config and model schemas and vali
                       (principals per role, MFA state and client) so consumers test their guards against
                       the same principals the kit tests with.
 packages/browser/     headless controller and state machine on supabase-js; optional default screens;
-                      theme, copy and routes from configuration.
+                      theme, copy and routes from configuration. dist/ holds the deterministic, generated
+                      (at pack time; not committed) prebuilt static-site assets (one ES module with supabase-js inlined, the stylesheet
+                      and a build manifest), so a consuming site never needs esbuild.
 packages/server/      Node 22+: createAuthServer, resolveSession, requirePermission, requireRole, requireMfa;
                       manager operations; operator operations; CLI. Optional export
                       @briqvent/dwarpal/server/hono (generic middleware; Hono is an optional peer dependency).
 packages/emulator/    development-only fake of the Supabase Auth API subset and the auth_kit RPC endpoints.
 supabase/migrations/  numbered SQL: schema auth_kit (exposed: wrappers, RLS helpers, profiles, public_clients view)
-                      and schema auth_kit_private (tables and implementations); grants asserted.
+                      and schema auth_kit_private (tables and implementations); grants asserted. Packed
+                      byte for byte; an installed `auth-kit migrate` finds these files by default.
 examples/protected-consumer/  minimal Node server proving the contract per role and permission, with its own
                               SQLite link table and the own/any guard.
 examples/rls-consumer/        one consumer table in Supabase Postgres with a policy using the RLS helpers.
+examples/creditone/           the CREDITONE model, page configuration and esbuild build; an example of one
+                              deployment, not an integration into any real site.
 examples/example-studio/      a second, synthetic brand with different role keys, route prefix and build tool (Vite).
-docs/                 this design, the low-level design and the user manual.
+docs/                 this design, the low-level design and the user manual (Markdown, packed with the package;
+                      the PDF editions are original snapshots and stay out of it).
+The examples and the emulator are not part of the packed package.
 ```
 
 The package contains no consumer-specific code: no application adapters, no brand names, no role names and no permission keys outside the examples.
@@ -517,11 +524,11 @@ Each case names the required outcome and where it runs. "Hosted" means against a
 
 Supported hosts in 0.x: (a) a static site with its own build step and a conventional web server, and (b) a Node 22+ server for private APIs.
 
-1. `npm install` a pinned version. `npx auth-kit init` writes a configuration skeleton, a model skeleton and `.env.example` with no values.
-2. `npx auth-kit migrate` (Management API token from the environment), or paste the numbered SQL files into the SQL editor in order. With `SUPABASE_ACCESS_TOKEN`, `npx auth-kit doctor` verifies schema version, exposed schemas, grants (catalog mode), asymmetric signing keys and the redirect allow-list; without that token its privileged catalog checks are `not_run` and its overall status is `incomplete`. `doctor --probe --probe-email <disposable user>` adds a separate actor probe.
+1. `npm install` a pinned version (until a release, the packed tarball). `npx auth-kit init` writes a configuration skeleton, a model skeleton and `.env.example` with no values.
+2. `npx auth-kit migrate` (Management API token from the environment; it reads the SQL files packed with the package, or `--migrations-dir`), or paste the numbered SQL files into the SQL editor in order. With `SUPABASE_ACCESS_TOKEN`, `npx auth-kit doctor` verifies schema version, exposed schemas, grants (catalog mode), asymmetric signing keys and the redirect allow-list; without that token its privileged catalog checks are `not_run` and its overall status is `incomplete`. `doctor --probe --probe-email <disposable user>` adds a separate actor probe.
 3. Configure the Supabase project: Site URL, exact redirect URLs, providers, SMTP, access-token lifetime, TOTP. This is manual, per project; see the [manual](manual.md#5-integration-steps).
 4. `npx auth-kit register-client`, `npx auth-kit apply-model --dry-run`, then `apply-model`, then `npx auth-kit bootstrap-manager --user-id <uuid>`. After any SQL editor change: `npx auth-kit export-model > auth-model.json`, review, commit.
-5. Browser: import the ESM entry and its stylesheet (all classes prefixed `ak-`), pass the validated configuration, and use the default screens or the headless controller.
+5. Browser: import the ESM entry and its stylesheet into your own bundler, or copy the prebuilt assets from `packages/browser/dist/` to a static host (all classes prefixed `ak-`); pass the configuration and use the default screens or the headless controller.
 6. Server: `createAuthServer(config)`, `resolveSession` per request, `requirePermission`, then your own ownership rules. Sensitive data only on this path.
 7. `npx auth-kit doctor --origin <url>` checks routes, CSP, `noindex` and the redirect allow-list against the project.
 

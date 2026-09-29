@@ -4,16 +4,26 @@
 // Consumers with their own bundler import `@briqvent/dwarpal/browser` source
 // instead and never need esbuild.
 //
-//   node scripts/build-browser.mjs [--outdir <dir>]
+//   node scripts/build-browser.mjs [--outdir <dir>] [--quiet]
+//   node scripts/build-browser.mjs --check [--outdir <dir>]
 //
-// The default output directory is packages/browser/dist. After writing, the
-// output is scanned for secret and operator markers and the build fails if
-// any is present. A manifest lists every file with its size, gzip size and
-// SHA-256, plus the esbuild and supabase-js versions that produced it.
+// The default output directory is packages/browser/dist. It is generated, not
+// committed: `npm pack` runs this script (the `prepack` script, quietly) so the
+// tarball always carries assets built from the tracked source, and a static-site
+// consumer never needs esbuild. The build is deterministic, so two builds give
+// the same bytes wherever the repository lives. The build runs in a
+// staging directory, scans the result for secret and operator markers and only
+// then copies it over the output directory, the manifest last, so a failed
+// build or scan never leaves a half-written or tainted asset behind. A
+// manifest lists every file with its size, gzip size and SHA-256, plus the
+// esbuild and supabase-js versions that produced it. `--check` builds the same
+// files in staging and fails, without writing, when the output directory
+// differs from them byte for byte: the guard against stale or altered assets.
 
 import { build, version as esbuildVersion } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, copyFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -54,13 +64,12 @@ export function scanForSecrets(text) {
   return found;
 }
 
-/**
- * @param {{ outdir?: string }} [options]
- * @returns {Promise<{ outdir: string, manifest: object }>}
- */
-export async function buildBrowser({ outdir = join(ROOT, 'packages/browser/dist') } = {}) {
-  await mkdir(outdir, { recursive: true });
-  const bundlePath = join(outdir, BUNDLE);
+const DEFAULT_OUTDIR = join(ROOT, 'packages/browser/dist');
+const MANIFEST = 'build-manifest.json';
+
+/** Builds into `stage` and returns the manifest; nothing outside `stage` is touched. */
+async function buildInto(stage) {
+  const bundlePath = join(stage, BUNDLE);
   const result = await build({
     entryPoints: [ENTRY],
     outfile: bundlePath,
@@ -80,11 +89,11 @@ export async function buildBrowser({ outdir = join(ROOT, 'packages/browser/dist'
   // Everything is inlined: a static host serves one file with no imports.
   const externalImports = Object.values(result.metafile.outputs).flatMap((output) => output.imports.map((entry) => entry.path));
   if (externalImports.length > 0) throw new Error(`build-browser: unresolved imports: ${externalImports.join(', ')}`);
-  await copyFile(STYLES, join(outdir, STYLESHEET));
+  await copyFile(STYLES, join(stage, STYLESHEET));
 
   const files = [];
   for (const name of [BUNDLE, STYLESHEET]) {
-    const bytes = await readFile(join(outdir, name));
+    const bytes = await readFile(join(stage, name));
     const markers = scanForSecrets(bytes.toString('utf8'));
     if (markers.length > 0) throw new Error(`build-browser: forbidden markers in ${name}: ${markers.join(', ')}`);
     files.push({
@@ -96,14 +105,54 @@ export async function buildBrowser({ outdir = join(ROOT, 'packages/browser/dist'
   }
   const supabase = JSON.parse(await readFile(join(ROOT, 'node_modules/@supabase/supabase-js/package.json'), 'utf8'));
   const manifest = { esbuild: esbuildVersion, supabaseJs: supabase.version, externalImports, files };
-  await writeFile(join(outdir, 'build-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-  return { outdir, manifest };
+  await writeFile(join(stage, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
+async function withStage(work) {
+  const stage = await mkdtemp(join(tmpdir(), 'dwarpal-browser-stage-'));
+  try {
+    return await work(stage);
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+/**
+ * @param {{ outdir?: string }} [options]
+ * @returns {Promise<{ outdir: string, manifest: object }>}
+ */
+export async function buildBrowser({ outdir = DEFAULT_OUTDIR } = {}) {
+  return withStage(async (stage) => {
+    const manifest = await buildInto(stage);
+    await mkdir(outdir, { recursive: true });
+    for (const name of [BUNDLE, STYLESHEET, MANIFEST]) await copyFile(join(stage, name), join(outdir, name));
+    return { outdir, manifest };
+  });
+}
+
+/**
+ * Rebuilds in staging and compares with `outdir` byte for byte.
+ * @returns {Promise<{ outdir: string, manifest: object, stale: string[] }>} `stale` names every differing or missing file.
+ */
+export async function checkBrowser({ outdir = DEFAULT_OUTDIR } = {}) {
+  return withStage(async (stage) => {
+    const manifest = await buildInto(stage);
+    const stale = [];
+    for (const name of [BUNDLE, STYLESHEET, MANIFEST]) {
+      const [fresh, committed] = await Promise.all([readFile(join(stage, name)), readFile(join(outdir, name)).catch(() => null)]);
+      if (committed === null || !fresh.equals(committed)) stale.push(name);
+    }
+    return { outdir, manifest, stale };
+  });
 }
 
 function parseArgs(argv) {
-  const args = { outdir: undefined };
+  const args = { outdir: undefined, check: false, quiet: false };
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--outdir' && i + 1 < argv.length) args.outdir = resolve(argv[++i]);
+    if (argv[i] === '--check') args.check = true;
+    else if (argv[i] === '--quiet') args.quiet = true;
+    else if (argv[i] === '--outdir' && i + 1 < argv.length) args.outdir = resolve(argv[++i]);
     else throw new Error(`build-browser: unknown argument ${JSON.stringify(argv[i])}`);
   }
   return args;
@@ -111,9 +160,18 @@ function parseArgs(argv) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
-    const { outdir, manifest } = await buildBrowser(parseArgs(process.argv.slice(2)));
-    for (const file of manifest.files) console.log(`${file.name}\t${file.bytes} B\t${file.gzipBytes} B gzip\t${file.sha256}`);
-    console.log(`build-browser: wrote ${outdir} (esbuild ${manifest.esbuild}, supabase-js ${manifest.supabaseJs})`);
+    const { check, quiet, ...options } = parseArgs(process.argv.slice(2));
+    if (check) {
+      const { outdir, manifest, stale } = await checkBrowser(options);
+      if (stale.length > 0) throw new Error(`build-browser: ${outdir} is stale (${stale.join(', ')}); run npm run build:browser.`);
+      console.log(`build-browser: ${outdir} matches a fresh build (esbuild ${manifest.esbuild}, supabase-js ${manifest.supabaseJs})`);
+      process.exit(0);
+    }
+    const { outdir, manifest } = await buildBrowser(options);
+    if (!quiet) {
+      for (const file of manifest.files) console.log(`${file.name}\t${file.bytes} B\t${file.gzipBytes} B gzip\t${file.sha256}`);
+      console.log(`build-browser: wrote ${outdir} (esbuild ${manifest.esbuild}, supabase-js ${manifest.supabaseJs})`);
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

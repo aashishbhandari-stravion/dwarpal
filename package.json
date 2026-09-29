@@ -2,7 +2,7 @@
   "name": "@briqvent/dwarpal",
   "version": "0.0.0",
   "private": true,
-  "description": "Authentication and role-based access kit for Supabase Auth: pure core contract, validators and permission evaluation, a stateless Node server library, the auth-kit operator CLI and a browser kit with optional default screens.",
+  "description": "Authentication and role-based access kit for Supabase Auth: a pure core contract with validators and permission evaluation, a stateless Node server library, the auth-kit operator CLI with its SQL migrations, and a browser kit with default screens and prebuilt static-site assets.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -35,6 +35,9 @@
       "default": "./packages/browser/index.js"
     },
     "./browser/styles.css": "./packages/browser/styles.css",
+    "./browser/dist/dwarpal-browser.js": "./packages/browser/dist/dwarpal-browser.js",
+    "./browser/dist/dwarpal-browser.css": "./packages/browser/dist/dwarpal-browser.css",
+    "./browser/dist/build-manifest.json": "./packages/browser/dist/build-manifest.json",
     "./package.json": "./package.json"
   },
   "bin": {
@@ -48,16 +51,24 @@
     "packages/browser/*.js",
     "packages/browser/*.d.ts",
     "packages/browser/lib/*.js",
-    "packages/browser/styles.css"
+    "packages/browser/styles.css",
+    "packages/browser/dist/dwarpal-browser.js",
+    "packages/browser/dist/dwarpal-browser.css",
+    "packages/browser/dist/build-manifest.json",
+    "supabase/migrations/*.sql",
+    "docs/*.md"
   ],
   "scripts": {
-    "test": "node --test \"tests/core/**/*.test.js\" \"tests/server/*.test.js\" \"tests/cli/cli.test.js\" \"tests/browser/*.test.js\" \"tests/emulator/*.test.js\"",
+    "test": "node --test \"tests/core/**/*.test.js\" \"tests/server/*.test.js\" \"tests/cli/cli.test.js\" \"tests/browser/*.test.js\" \"tests/emulator/*.test.js\" \"tests/examples/*.test.js\" \"tests/package/*.test.js\"",
     "test:browser-dom": "node --test \"tests/browser/dom/*.test.js\"",
     "test:browser-integration": "node --test \"tests/integration/*.playwright.test.js\"",
     "test:browser-sensitivity": "node tests/browser/sensitivity.js",
     "test:emulator": "node --test \"tests/emulator/*.test.js\"",
     "test:sql-server": "node tests/sql/run.js tests/server/sql/manager.test.js tests/server/sql/mfa-reset.test.js tests/server/sql/operator.test.js tests/server/sql/catalog.test.js tests/cli/sql-flow.test.js",
+    "test:examples-sql": "node tests/sql/run.js tests/examples/sql/rls-consumer.test.js",
+    "test:examples-built": "node scripts/check-examples.mjs",
     "build:browser": "node scripts/build-browser.mjs",
+    "prepack": "node scripts/build-browser.mjs --quiet",
     "check:types": "tsc -p tsconfig.json",
     "check:package": "node scripts/check-package.mjs",
     "check": "npm test && npm run check:types && npm run check:package"

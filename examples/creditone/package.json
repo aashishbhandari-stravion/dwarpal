@@ -1,0 +1,12 @@
+{
+  "name": "creditone-auth-example",
+  "private": true,
+  "type": "module",
+  "description": "Example only: the CREDITONE model and a static-site build for the auth pages. Not an integration into any real checkout.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

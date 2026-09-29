@@ -1,0 +1,22 @@
+{
+  "clientId": "example-studio",
+  "supabaseUrl": "https://your-project-ref.supabase.co",
+  "publishableKey": "sb_publishable_replace-me",
+  "routes": {
+    "prefix": "/studio/account",
+    "signIn": "log-in",
+    "signUp": "join",
+    "signOut": "log-out"
+  },
+  "origin": "https://studio.example.org",
+  "allowedReturnPaths": ["/studio", "/studio/posts"],
+  "defaultReturnPath": "/studio",
+  "providers": { "email": true, "google": false },
+  "brand": {
+    "name": "Example Studio",
+    "colors": { "primary": "#7a3db8", "onPrimary": "#ffffff", "surface": "#faf7ff", "border": "#d9cdea" },
+    "fontStack": "Georgia, serif"
+  },
+  "copy": { "signIn.title": "Welcome back to {brand}" },
+  "selfSignup": true
+}

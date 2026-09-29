@@ -1,3 +1,10 @@
 node_modules/
 *.tgz
+# Generated on every `npm pack` by the prepack script (deterministic; a committed copy would only go stale).
 packages/browser/dist/
+# Examples are separate projects; their installs, builds and local data stay out of the repository.
+examples/**/node_modules/
+examples/**/dist/
+examples/**/*.sqlite
+examples/**/*.sqlite-*
+examples/**/.env

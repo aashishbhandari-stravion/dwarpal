@@ -1,0 +1,12 @@
+{
+  "name": "example-studio-auth-example",
+  "private": true,
+  "type": "module",
+  "description": "Example only: a synthetic second brand with different role keys, route prefix and a Vite build, using the same unchanged @briqvent/dwarpal package.",
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "8.3.1"
+  }
+}

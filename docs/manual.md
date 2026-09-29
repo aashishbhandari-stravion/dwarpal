@@ -2,7 +2,7 @@
 
 This manual is for a developer, or an AI coding agent, about to integrate `@briqvent/dwarpal` into a web application. Read it fully before planning the integration. The contract and its guarantees are in the [design](design.md); the SQL design and failure analysis are in the [RBAC low-level design](rbac-lld.md).
 
-Status: this manual describes contract 0.5. The package is not released yet; commands and entry points are those the release will provide.
+Status: this manual describes contract 0.5 as implemented in the pre-release package (private `0.0.0`, not published to npm). Everything described here has been verified **locally**: unit tests, a real local PostgreSQL, Chromium against a synthetic loopback fixture, and a clean install of the packed tarball. Nothing has yet been run against a hosted Supabase project, a real e-mail sender, Google sign-in or an authenticator app; section 14 lists what is and is not verified. Where this manual says "hosted" behaviour, it describes the design, not a measured result.
 
 ## 1. What Dwarpal is
 
@@ -23,7 +23,7 @@ A reusable authentication and authorization layer on **Supabase Auth (Free plan 
 - **Not an admin console.** Roles and permissions are defined in a file applied by the operator. Managers grant and revoke memberships through your own pages using the library; there is no built-in management UI.
 - **Not a store of your business data.** It never holds customer, lead or order references. If a user must be linked to a historical record, your application stores and audits that link.
 - **Not an adapter for any particular application.** There are no application-specific helpers or hooks. You build the actor your code needs from the `Principal` the server returns. The kit does not know what a lead, an order or a customer is.
-- **Not a cookie-session system.** Tokens live in the browser's local storage via the official Supabase client. If you need server-managed cookie sessions, this kit does not provide them.
+- **Not a cookie-session system.** The browser session, including its refresh token, lives in the browser's `localStorage`, stored by the official Supabase client. Any script that runs on your site's origin can read it (cross-site scripting is the residual risk; section 9 lists the mitigations). If you need server-managed cookie sessions, this kit does not provide them.
 
 ## 3. Concepts
 
@@ -59,16 +59,18 @@ These are the rules the kit relies on. Breaking them is not supported.
 11. **Treat `unavailable` as a denial with a retry hint (HTTP 503).** The kit fails closed when Supabase cannot be reached. Never fall back to a cached or empty principal.
 12. **Keep the auth pages out of search indexes** (`noindex`) and keep public content browsable without an account.
 13. **Assert the contract version at startup.** The library exports `AUTH_CONTRACT_VERSION`; refuse to start on a mismatch.
+14. **Never cache an authenticated answer.** Send `Cache-Control: no-store` on every response that depends on a principal, and never keep a principal, a permission list or a "is this user staff" answer between requests. The library keeps no such cache either; it re-reads the session and the access on every request.
+15. **Operator and manager boundaries stay apart.** The *operator* (whoever holds the project's secret key and Management token, running `auth-kit`) owns the model, client registration and the first manager. A *manager* (a user holding a `manages_members` role) owns people, through your pages and the user's own token; a manager can never grant or revoke a manager role, and a model change can never promote existing holders. Never give a web server the secret key so that it can "help" managers.
 
 ## 5. Integration steps
 
-1. **Install** a pinned version of `@briqvent/dwarpal`. Run `npx auth-kit init` to get a configuration skeleton, a model skeleton and an environment example with no values.
+1. **Install** a pinned version of `@briqvent/dwarpal`. Until a release is published, that is the packed tarball (`npm install ./briqvent-dwarpal-0.0.0.tgz`). Run `npx auth-kit init` to get a configuration skeleton, a model skeleton and an environment example with no values (`init` never overwrites an existing file).
 2. **Create a Supabase project** for this website, on the Free plan or above. Enable asymmetric JWT signing keys; create the publishable and secret keys; create a Management API personal access token for the operator; enable email confirmations; set the access-token lifetime (30 minutes recommended); use `{{ .TokenHash }}` in the email templates; enable TOTP if any role will require MFA; configure custom SMTP with SPF and DKIM on the sending domain (the built-in sender is rate limited and not for production); configure Google if you use it, with the redirect URI `https://<project-ref>.supabase.co/auth/v1/callback`; and add the **exact** redirect URLs for each environment, with no wildcards. These are manual project settings; the kit cannot set them for you.
-3. **Migrate**: `npx auth-kit migrate` (uses `SUPABASE_ACCESS_TOKEN` for the Management API), or paste the numbered SQL files into the SQL editor in order. Then run `npx auth-kit doctor` with that token to inspect schema version, exposed schemas, grants and keys. With only the secret key, privileged catalog checks are `not_run` and the overall report is `incomplete`; this does not confirm the grants. To prove behaviour as a real user, create a disposable test user and run `npx auth-kit doctor --probe --probe-email <that user>`; the report says which mode produced each line.
+3. **Migrate**: `npx auth-kit migrate` (uses `SUPABASE_ACCESS_TOKEN` for the Management API), or paste the numbered SQL files into the SQL editor in order. The SQL files ship inside the package, in `node_modules/@briqvent/dwarpal/supabase/migrations/`, and an installed `auth-kit migrate` reads them from there without any option (`--migrations-dir <dir>` overrides). Each file runs as one transaction and records its version in the kit's ledger, so a rerun after a lost answer applies only what is missing; a partial or out-of-order installation is refused, and after the files the grant assertion must come back empty. Then run `npx auth-kit doctor` with that token to inspect schema version, exposed schemas, grants and keys. **Complete `doctor` catalog checks, including grants, need `SUPABASE_ACCESS_TOKEN` (the Management API token) in addition to the secret key.** With only the secret key, the privileged catalog checks are reported `not_run` and the overall report is `incomplete`, never healthy; the secret-key model export and the public signing-key check may still run. `doctor --probe` is a separate mode that signs in a disposable user and makes real calls as `authenticated` and `anon`; it does not replace catalog inspection. To prove behaviour as a real user, create a disposable test user and run `npx auth-kit doctor --probe --probe-email <that user>`; the report says which mode produced each line.
 4. **Register the client**: `npx auth-kit register-client --client <id> --name "<display name>" --signup open|closed`.
 5. **Write the model** (`auth-model.json`) and apply it: `npx auth-kit apply-model --dry-run`, review, then `apply-model`. The model must contain at least one `manages_members` role.
 6. **Bootstrap the first manager**: `npx auth-kit bootstrap-manager --client <id> --role <manager role> --user-id <uuid>`. Find the id in the Supabase dashboard, or pass `--email` and let the CLI look it up. It reads the whole user list first and refuses if the email matches no confirmed user, more than one, or if the project has more users than it will scan (about ten thousand; `lookup_incomplete`); in that case use `--user-id`. `--invite` sends an invitation to a missing user and prints the id to rerun with. The client becomes **live** after this step, and from then on the model can never leave it without a manager.
-7. **Browser**: import the ESM entry and the stylesheet (all classes prefixed `ak-`), pass your validated configuration, and mount the default screens at your configured routes or drive the headless controller from your own pages. Extend your Content Security Policy's `connect-src` with your Supabase project origin only.
+7. **Browser**: either import `@briqvent/dwarpal/browser` and `@briqvent/dwarpal/browser/styles.css` into your own bundle, or copy the prebuilt static assets (`packages/browser/dist/dwarpal-browser.js` and `.css`) to your site; all classes are prefixed `ak-`. Pass your configuration and mount the default screens at your configured routes or drive the headless controller from your own pages. Extend your Content Security Policy's `connect-src` with your Supabase project origin only. Section 9 has the details.
 8. **Server**: construct the auth server once with your `clientId`, resolve the session per request, require permissions, then apply your own ownership rules.
 9. **Verify**: `npx auth-kit doctor --origin <url>` checks routes, CSP, `noindex` and the redirect allow-list against the project.
 
@@ -137,6 +139,8 @@ async function handler(request, postId) {
 }
 ```
 
+**Answer safely.** Send `Cache-Control: no-store` on every response that depends on the principal. Map the library's errors to fixed answers (section 10) and never echo a token, a message from Supabase or an id the caller supplied. If your own data store is unreadable, locked or times out, answer 503 like `unavailable`: never fall back to "no link found" or to a broader answer. [`examples/protected-consumer`](../examples/protected-consumer) is a complete, tested example of all of this with its own SQLite link table.
+
 **Building your own actor.** Read `principal.identity.userId` for the stable subject, `principal.memberships` (already scoped to your configured client) for role keys, `principal.access.permissions` for what the session may do now and `principal.access.activeRoles` for the roles that count now. Put that in whatever object your code wants; the kit ships no such object. If your application keeps links between users and records, key them by `identity.userId`, store them in your own tables and audit them yourself.
 
 **Testing your guards.** Import the kit's evaluation fixture from `@briqvent/dwarpal/testing`. It exports principals for each role, MFA state and client scope that the kit itself is tested with, so your guard tests and the kit's tests agree on what a principal looks like.
@@ -165,6 +169,8 @@ create policy notes_read on app.notes for select to authenticated using (
 );
 ```
 
+A complete, tested policy set for one table is in [`examples/rls-consumer`](../examples/rls-consumer) (`policies.sql`). Its tests run against a real local PostgreSQL and show that a membership revoke changes the answer on the next query while the token claims are unchanged.
+
 Understand what each path checks before choosing it:
 
 | | Node path (`resolveSession`) | Direct path (browser → PostgREST under RLS) |
@@ -175,20 +181,42 @@ Understand what each path checks before choosing it:
 | Sees sign-out, ban or user deletion | next request | **only when the access token expires** (up to the configured lifetime) |
 | Suitable for | anything sensitive | public or low-risk reads and writes |
 
-A user who signed out, or whom you banned or deleted, can keep using the direct path with an unexpired token. The kit calls this "revocation bounded by JWT expiry" and never claims more for that path. Route anything you would not want such a user to see through your Node server. Test revocation on both paths before you go live.
+A user who signed out, or whom you banned or deleted, can keep using the direct path with an unexpired token; the path is bounded by the token's lifetime (30 minutes recommended), not by the session. This bound is what the design promises and what the SQL checks assume; it has not yet been measured against a hosted project. The kit calls this "revocation bounded by JWT expiry" and never claims more for that path. Route anything you would not want such a user to see through your Node server. Test revocation on both paths before you go live.
 
 ## 9. Browser usage
 
-**Default screens.** Mount `createAuthScreens(config)` at your configured route prefix (default `/account`).
+**Two ways to ship the browser code.**
 
-**Headless.** `createAuthController(config)` exposes `state`, `signUp`, `signIn`, `signInWithGoogle`, `signOut`, `requestReset`, `completeReset`, `enrolMfa`, `challengeMfa`, `getPrincipal()` and a typed event stream.
+1. *Your own bundler.* `import { createAuthController, mountAuthScreens } from '@briqvent/dwarpal/browser'` and `import '@briqvent/dwarpal/browser/styles.css'`. The pinned `@supabase/supabase-js` (exactly 2.117.2) is a dependency of the package and your build bundles it.
+2. *No bundler (a static host).* Copy `node_modules/@briqvent/dwarpal/packages/browser/dist/dwarpal-browser.js` and `dwarpal-browser.css` to your site. The JavaScript is one ES module with supabase-js inlined (about 270 KB, 73 KB gzipped), the stylesheet is about 4 KB, and `build-manifest.json` lists each file's size and SHA-256 and the tool versions. The assets are generated when the package is packed, from the package's own source; the build is deterministic, scans its output for secret and operator markers and fails if it finds any, and the package check rebuilds the assets and fails if the shipped ones differ. You never need esbuild.
 
-Screen states you should render: `idle`, `submitting`, `sent`, `error(code)`, `expired_link`, `already_used`, `mfa_enrol`, `mfa_challenge`, `setup_pending`, `no_access`, `signed_in`, `offline`.
+```html
+<link rel="stylesheet" href="/account/assets/dwarpal-browser.css">
+<div id="dwarpal-auth"></div>
+<script type="module">
+  import { createAuthController, mountAuthScreens } from '/account/assets/dwarpal-browser.js';
+  const controller = createAuthController({ config });   // your public configuration (see below)
+  mountAuthScreens(document.getElementById('dwarpal-auth'), controller);
+  controller.start();
+</script>
+```
+
+Load the script from a file instead of inlining it if your Content Security Policy forbids inline scripts (recommended); [`examples/creditone`](../examples/creditone) and [`examples/example-studio`](../examples/example-studio) do so, with a bundler each, and one static page per route.
+
+**Configuration** is public data: the project URL, the *publishable* key, the site origin, exact allowed return paths, routes, providers, brand and copy. The controller refuses a secret key or a legacy `service_role` key, and the example builds validate the configuration first so a secret key stops the build. The route prefix defaults to `/account`; each route name (`signIn`, `signUp`, `verify`, `callback`, `forgot`, `reset`, `mfa`, `signOut`) maps to one path segment under it and you may rename them. Serve one static page per route.
+
+**Headless.** `createAuthController({ config, ... })` returns `getView()`, `subscribe(listener)`, `start()`, `signIn`, `signUp`, `resendConfirmation`, `confirmLink`, `startGoogle`, `requestRecovery`, `updatePassword`, `startMfaEnrol`, `verifyMfa`, `skipMfaEnrol`, `retry`, `signOut`, `getPrincipal()` and `dispose()`. `mountAuthScreens(root, controller, { copy })` renders the default screens from the same view; its texts come from `DEFAULT_COPY` and your `copy` overrides, and are set as text, never as markup.
+
+Screen states you should render: `idle`, `submitting`, `sent`, `error(code)`, `expired_link`, `already_used`, `mfa_enrol`, `mfa_challenge`, `setup_pending`, `no_access`, `signed_in`, `offline`. `BROWSER_STATES` and `BROWSER_ERROR_CODES` are the closed sets.
 
 After sign-in the kit calls `ensure_profile`, reads the user's access, and calls `join_client` only if the user has never been enrolled for this client. Two "no membership" states look different on purpose:
 
 - `setup_pending`: the client is not registered yet, or has no self-assignable role yet. The operator's setup is in progress. Show a retry button; do not loop automatically.
 - `no_access`: the client is closed (invite-only), or the user was enrolled once and has since had their membership revoked. Tell the user to ask the site for access. There is nothing to retry.
+
+**Verification and reset links** only ask for a click: opening the link does not consume it, so mail scanners that prefetch links do not spend it. The return path (`next`) is chosen where a flow starts (for example the sign-up page's `?next=`), is checked against your exact `allowedReturnPaths` and otherwise falls back to your default; a value in a mail link is ignored.
+
+**Where the session lives, and its risk.** Supabase's browser client keeps the session (access and refresh token) in `localStorage` for your origin. A script injected into your origin can read it: this is the residual cross-site scripting risk of this design, and the kit does not hide it. Reduce it: a strict Content-Security-Policy (`script-src 'self'`, no inline or third-party scripts on pages at this origin), no user-controlled HTML, short access tokens (30 minutes recommended), sign-out with global scope (the kit's sign-out revokes every session, and clears local state even if the network call fails), and keep sensitive data on the Node path, which checks the live session on every request. Serve the auth pages `noindex`. Extend `connect-src` with your Supabase origin only.
 
 `getPrincipal()` in the browser is display state only. Never make an authorization decision from it.
 
@@ -206,6 +234,10 @@ After sign-in the kit calls `ensure_profile`, reads the user's access, and calls
 | `unavailable` | Supabase could not be reached or answered abnormally | 503 |
 | `provider_unavailable` | the Google or SMTP flow failed | show retry |
 | `config_invalid`, `model_invalid` | your configuration or model file failed validation | fail at startup or in the CLI |
+
+Browser errors are a separate closed set (`BROWSER_ERROR_CODES`): `invalid_input`, `invalid_credentials`, `email_unverified`, `weak_password`, `same_password`, `rate_limited`, `mfa_invalid_code`, `provider_unavailable`, `method_disabled`, `session_ended` and `unavailable`. The default screens turn each into fixed text, and a sign-up or reset request over an existing address gets the same neutral "if the address can be used, we sent an e-mail" answer, so the screens do not reveal which addresses have accounts.
+
+**Retrying.** `unavailable` and `offline` are retryable and change nothing on their own. Repeating a manager grant or revoke with the same `requestId` is always safe (stored result, or `request_conflict`). A lost reply to the browser's `join_client` leaves the screen retryable and any number of retries enrol the user exactly once. The CLI exits with a closed status set: `0` done, `1` refused or not completed, `2` usage or input error, `3` Supabase unreachable or abnormal, `4` outcome unknown (a write may have been applied; the printed note names the command that converges), `5` prerequisite missing or `doctor` incomplete, `70` internal error. The CLI prints one JSON document on stdout (the result or `{ "error": code }`; `export-model` prints the model file itself) and short fixed notes on stderr, and redacts every credential value.
 
 CLI-only outcomes:
 
@@ -233,7 +265,7 @@ CLI-only outcomes:
 
   The reset applies to the user across every client of the project.
 - **Free plan.** On Supabase's Free plan, projects pause after a period without activity, and email sending and token refresh are rate limited. Custom SMTP is required for real sign-ups on any plan.
-- **Diagnostics.** With `SUPABASE_ACCESS_TOKEN`, `auth-kit doctor` inspects grant drift and memberships without audit events. Pass `--client` and `--model` to compare the applied model with your file. Without the Management token, privileged catalog checks are `not_run` and the overall result is `incomplete`; `--probe` separately exercises a disposable user.
+- **Diagnostics.** With `SUPABASE_ACCESS_TOKEN`, `auth-kit doctor` inspects grant drift and memberships without audit events. Pass `--client` and `--model` to compare the applied model with your file. Without the Management token (only the secret key), the privileged catalog checks are `not_run` and the overall result is `incomplete`, never healthy; `--probe` separately exercises a disposable user and does not stand in for the catalog checks.
 - **Model recovery.** If the model was changed from the SQL editor, `auth-kit export-model` writes the applied model in file format. Commit it before the next `apply-model`, or that apply will revert the change.
 
 ## 12. Limitations
@@ -248,7 +280,25 @@ CLI-only outcomes:
 - Supabase project configuration is manual per environment and cannot be automated by install.
 - Write throughput per client is serialised (section 11).
 
-## 13. Checklist before you call the integration done
+## 13. Examples
+
+Runnable examples live in the repository's `examples/` directory (they are not part of the installed package). They are examples: none is connected to a real site, and none carries credentials.
+
+- `examples/protected-consumer`: a generic Node endpoint, its own SQLite link table, the own/any guard, fail-closed behaviour (needs `node:sqlite`: Node 22.13 or later, 24 recommended).
+- `examples/rls-consumer`: Row Level Security policies for one table using the kit's helpers.
+- `examples/creditone`: the CREDITONE model and configuration, and an esbuild build of the auth pages. It is an example of one deployment, not part of the kit and not an edit of any real checkout.
+- `examples/example-studio`: a synthetic second brand with other role keys, route prefix and route names, copy and a Vite build. It runs on the same unchanged package and shows that nothing brand-specific lives in the kit.
+
+## 14. What has been verified
+
+Every statement in this manual about behaviour has an evidence class. *Local* means unit tests, a real local PostgreSQL (SQL and RLS), real Chromium against a synthetic loopback Auth/RPC fixture (browser flows), a stand-in Management API (installed `migrate`), and a packed-tarball install in a clean consumer. *Hosted* would mean a real Supabase project, and none has been run:
+
+- not yet verified: the Node path against live Supabase Auth, revocation on both paths side by side (the JWT-expiry bound on the direct path), PostgREST refusing calls into `auth_kit_private`, real SMTP delivery, Google sign-in, a real authenticator app, the real Management API (`migrate`, `doctor` catalog mode) and a full `doctor --probe`;
+- not yet done: acceptance by a consuming site (the CREDITONE site) and release acceptance.
+
+Treat those as open until a hosted verification and the owner's acceptance are recorded.
+
+## 15. Checklist before you call the integration done
 
 - [ ] The secret key, Management API token and provider secrets appear nowhere in the browser bundle, logs or repository.
 - [ ] Every route that touches sensitive data goes through your Node server: `resolveSession`, then `requirePermission`, then your own ownership rule.
@@ -261,3 +311,5 @@ CLI-only outcomes:
 - [ ] Redirect URLs in the project are exact, per environment.
 - [ ] Auth pages are `noindex`; public pages work signed out.
 - [ ] Historical records are reachable only through explicit link rows your application stores.
+- [ ] Authenticated responses carry `Cache-Control: no-store`, and an unreadable data store answers 503.
+- [ ] A strict Content-Security-Policy is in place on the pages that hold the browser session in `localStorage`.
