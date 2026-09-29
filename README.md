@@ -116,7 +116,7 @@ DWARPAL_PG_BIN=<postgres bin dir> npm run test:sql-server    # server and CLI ag
 DWARPAL_PG_BIN=<postgres bin dir> npm run test:examples-sql  # the RLS example
 ```
 
-**Node versions.** The package check (pack, install, imports, CLI, prebuilt assets in Chromium) passes on Node 22 and 24, and the core, server, CLI, emulator, example and package tests pass on both. Known limit: on Node 22 seven Node-hosted browser-controller tests (`tests/browser/onboarding.test.js` and `signout.test.js`) are reported as cancelled, because the controller's request-deadline timer is `unref`'d and a deliberately hung fixture request then lets Node 22's event loop exit; they pass on Node 24. This affects the test suite, not the shipped browser code. The `protected-consumer` example uses `node:sqlite` and needs Node 22.13 or later.
+**Node versions.** The package check (pack, install, imports, CLI, prebuilt assets in Chromium) and the root unit tests pass on Node 22 and 24. The `protected-consumer` example uses `node:sqlite` and needs Node 22.13 or later.
 
 The [SQL gates](tests/sql/README.md) start a disposable PostgreSQL cluster from separate PostgreSQL binaries; nothing is installed system-wide. Local SQL checks do not establish hosted PostgREST or live Supabase Auth behavior.
 

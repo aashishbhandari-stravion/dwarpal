@@ -19,8 +19,9 @@ export function timedFetch(fetchImpl, timeoutMs) {
     }
     // The timer covers the body too: aborting a request whose body has been
     // read already has no effect, so it is left to expire rather than tracked.
+    // Keep it referenced in Node: an unanswered fetch may be the only pending
+    // work, and unref would let the process exit before the deadline fires.
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    if (typeof timer === 'object' && typeof timer?.unref === 'function') timer.unref();
     const aborted = new Promise((_, reject) => {
       controller.signal.addEventListener('abort', () => reject(new DOMException('The request was aborted.', 'AbortError')), { once: true });
     });
