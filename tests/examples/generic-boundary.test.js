@@ -1,6 +1,6 @@
 // The kit is generic: consumer-specific role keys, permission keys, brands and
-// adapters exist only under examples/ (and in the design's prose). This scans
-// the kit's shipped source and SQL for them.
+// adapters exist only under examples/. This scans the kit's shipped source,
+// SQL and packed documentation for them.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +37,17 @@ test('no consumer-specific name, key or adapter in the kit\'s shipped source or 
     }
   }
   assert.ok(scanned > 40, `scanned ${scanned} files`);
+});
+
+// The packed documentation is generic too (the manual never names a client):
+// the README and docs/*.md go into the tarball; the examples do not.
+test('no client-specific example or brand is named in the packed README or docs', async () => {
+  const docs = ['README.md', ...(await readdir(join(root, 'docs'))).filter((name) => name.endsWith('.md')).map((name) => `docs/${name}`)];
+  assert.ok(docs.includes('docs/manual.md') && docs.includes('docs/design.md'), docs.join(', '));
+  for (const file of docs) {
+    const text = await readFile(join(root, file), 'utf8');
+    assert.ok(!/creditone/i.test(text), `${file} names the client-specific example`);
+  }
 });
 
 test('the kit stores no customer or record links of its own', async () => {

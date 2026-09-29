@@ -1,23 +1,30 @@
 #!/usr/bin/env node
 // Builds and exercises the reuse examples against the *packed* package, the way
 // a consuming project would: pack, stage each example in a throwaway directory,
-// install the tarball there (plus the example's own build tool), and then
+// install each example's build tool exactly as its committed package-lock.json
+// pins it (`npm ci`), install the tarball next to it without touching that
+// lock, check that every locked package is installed at its locked version,
+// and then
 //
-//   1. build the CREDITONE example (esbuild) and the synthetic second brand
-//      (Vite) with their shipped placeholder configuration and inspect the
-//      output: one page per route under the configured prefix, `noindex`, no
-//      inline script, no secret marker; a secret key in the configuration makes
-//      the build fail and leaves a previous build untouched;
+//   1. build the client-specific example (esbuild) and the synthetic second
+//      brand (Vite) with their shipped placeholder configuration and inspect
+//      the output: one page per route under the configured prefix, `noindex`,
+//      no inline script, no secret marker; a secret key in the configuration
+//      stops the build before anything is written and leaves a previous build
+//      untouched; for the esbuild example, a bundling failure after validation
+//      does too, and leaves no staging directory behind;
 //   2. run the generic protected consumer against the installed package;
-//   3. drive both built sites in Chromium against the loopback fixture.
+//   3. drive both built sites in Chromium against the loopback fixture,
+//      including builds with hostile and punctuated (valid) brand names.
 //
 // Usage: node scripts/check-examples.mjs [--tarball <file>] [--work-dir <empty dir>] [--keep] [--offline]
-// Installing the example build tools (esbuild, Vite) uses the npm registry
-// unless --offline is given and they are already in the npm cache. Nothing
-// here contacts Supabase or any provider.
+// Installing the locked example build tools (esbuild, Vite) and the tarball's
+// own dependencies uses the npm registry unless --offline is given and they are
+// already in the npm cache. Nothing here contacts Supabase or any provider.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +79,29 @@ async function inspectBuild(label, dist, { prefix, routes }) {
   return { files: files.length, pages: pages.length };
 }
 
+/** Fails unless every package in `dir`'s lockfile is installed at its locked version; returns the installed count. */
+async function verifyLocked(label, dir) {
+  const lock = JSON.parse(await readFile(join(dir, 'package-lock.json'), 'utf8'));
+  let installed = 0;
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (path === '') continue;
+    const manifest = await readFile(join(dir, path, 'package.json'), 'utf8').then(JSON.parse, () => null);
+    // Optional platform packages (other operating systems, CPUs or libc) are locked but not installed here.
+    if (manifest === null && entry.optional) continue;
+    if (manifest === null) fail(`${label}: locked ${path} is not installed`);
+    if (manifest.version !== entry.version) fail(`${label}: ${path} is ${manifest.version}, locked ${entry.version}`);
+    installed += 1;
+  }
+  return installed;
+}
+
+/** A digest of every file's path and bytes under `dir`. */
+async function snapshot(dir) {
+  const hash = createHash('sha256');
+  for (const file of await listFiles(dir)) hash.update(`${file}\0`).update(await readFile(join(dir, file))).update('\0');
+  return hash.digest('hex');
+}
+
 async function main() {
   const workDir = option('--work-dir') ? resolve(option('--work-dir')) : await mkdtemp(join(tmpdir(), 'dwarpal-examples-'));
   await mkdir(workDir, { recursive: true });
@@ -84,19 +114,34 @@ async function main() {
     }
     const stage = join(workDir, 'stage');
     await mkdir(stage);
-    const installArgs = ['install', '--no-audit', '--no-fund', '--ignore-scripts', ...(offline ? ['--offline'] : []), tarball];
+    const npmFlags = ['--no-audit', '--no-fund', '--ignore-scripts', ...(offline ? ['--offline'] : [])];
     const layout = { creditone: 'creditone', studio: 'example-studio', consumer: 'protected-consumer' };
+    // The two build examples carry a lockfile for their build tool; the protected consumer needs none.
+    const locked = ['creditone', 'studio'];
     for (const [dir, source] of Object.entries(layout)) {
       await cp(join(root, 'examples', source), join(stage, dir), { recursive: true, filter: (path) => !/\/(node_modules|dist)(\/|$)/.test(path) });
     }
     // The protected consumer is a copy-and-own sample without a manifest of its own.
     await writeFile(join(stage, 'consumer/package.json'), JSON.stringify({ name: 'protected-consumer-check', private: true, type: 'module' }));
     await cp(join(root, 'tests/examples/support/installed-consumer-smoke.mjs'), join(stage, 'consumer/smoke.mjs'));
-    for (const dir of Object.keys(layout)) {
+    const npm = (dir, npmArgs) => {
       try {
-        run('npm', installArgs, join(stage, dir));
+        run('npm', [...npmArgs, ...npmFlags], join(stage, dir));
       } catch (error) {
-        fail(`npm install in ${dir} failed (environment, not an example result): ${String(error.stderr ?? error.message).trim().split('\n').slice(-3).join(' | ')}`);
+        fail(`npm ${npmArgs[0]} in ${dir} failed (environment, not an example result): ${String(error.stderr ?? error.message).trim().split('\n').slice(-3).join(' | ')}`);
+      }
+    };
+    for (const dir of Object.keys(layout)) {
+      if (locked.includes(dir)) {
+        const lock = await readFile(join(stage, dir, 'package-lock.json'));
+        npm(dir, ['ci']);
+        // The package goes next to the locked tools without being written into the example's manifest or lock.
+        npm(dir, ['install', '--no-save', tarball]);
+        if (!lock.equals(await readFile(join(stage, dir, 'package-lock.json')))) fail(`${dir}: installing the tarball changed package-lock.json`);
+        const count = await verifyLocked(dir, join(stage, dir));
+        console.log(`check-examples: ${dir} build tools installed from its lockfile (${count} locked packages at their locked versions)`);
+      } else {
+        npm(dir, ['install', tarball]);
       }
     }
     const installed = JSON.parse(await readFile(join(stage, 'creditone/node_modules/@briqvent/dwarpal/package.json'), 'utf8'));
@@ -125,6 +170,24 @@ async function main() {
       if (`${refused.stdout}${refused.stderr}`.includes('sb_secret_examplecheckmarker0000')) fail(`${label}: the refusal printed the key`);
       if (JSON.stringify(before) !== JSON.stringify(await listFiles(join(cwd, 'dist')))) fail(`${label}: a refused build changed dist/`);
       console.log(`check-examples: ${label} builds ${summary.pages} pages under ${absolute.signIn.replace(/\/[^/]+$/, '')}/ (${summary.files} files), noindex, no inline script, no secret marker; a secret key is refused and dist/ is untouched`);
+      if (dir === 'creditone') {
+        // A bundling failure after validation also leaves dist/ as it was, and no staging directory.
+        const source = join(cwd, 'src/account.js');
+        const original = await readFile(source);
+        const distBytes = await snapshot(join(cwd, 'dist'));
+        await writeFile(source, `${original}\nimport './does-not-exist.js';\n`);
+        let broken;
+        try {
+          broken = spawnSync(process.execPath, command, { cwd, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME } });
+        } finally {
+          await writeFile(source, original);
+        }
+        if (broken.status === 0) fail(`${label}: a build with an unresolvable import succeeded`);
+        if (distBytes !== await snapshot(join(cwd, 'dist'))) fail(`${label}: a failed bundling step changed dist/`);
+        const leftovers = (await readdir(cwd)).filter((name) => name.startsWith('dist.'));
+        if (leftovers.length > 0) fail(`${label}: a failed build left ${leftovers.join(', ')}`);
+        console.log(`check-examples: ${label}: a bundling failure after validation leaves dist/ byte for byte and no staging directory`);
+      }
     }
 
     // 2. The generic protected consumer against the installed package.

@@ -29,6 +29,10 @@ const config = validateClientConfig(input);
 // The model and the page configuration must name the same client.
 validateModel(readJson('auth-model.json'), { clientId: config.clientId });
 
+// Every configured value is text here, never markup: the brand name may be any
+// string of up to 128 characters, including `<`, `&` and quotes.
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
 // One small static page per route, all loading the entry chunk and its stylesheet.
 function routePages() {
   return {
@@ -46,14 +50,14 @@ function routePages() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${TITLES[name]} | ${config.brand.name}</title>
-<meta name="description" content="${TITLES[name]} for ${config.brand.name}.">
+<title>${escapeHtml(`${TITLES[name]} | ${config.brand.name}`)}</title>
+<meta name="description" content="${escapeHtml(`${TITLES[name]} for ${config.brand.name}.`)}">
 <meta name="robots" content="noindex, nofollow">
-<link rel="stylesheet" href="${config.routes.prefix}/${sheet.fileName}">
+<link rel="stylesheet" href="${escapeHtml(`${config.routes.prefix}/${sheet.fileName}`)}">
 </head>
 <body>
 <main id="dwarpal-auth"></main>
-<script type="module" src="${config.routes.prefix}/${entry.fileName}"></script>
+<script type="module" src="${escapeHtml(`${config.routes.prefix}/${entry.fileName}`)}"></script>
 </body>
 </html>
 `,

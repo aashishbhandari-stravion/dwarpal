@@ -2,7 +2,7 @@
 
 This is the design of `@briqvent/dwarpal`, contract version **0.5**. It describes what the package does, the guarantees it makes and the rules an integration must follow. For step-by-step integration read the [user manual](manual.md). For the SQL design, sequence diagrams and failure analysis read the [RBAC low-level design](rbac-lld.md).
 
-Status: the design is frozen at contract 0.5. The package is private (`0.0.0`) and nothing is published to npm. The core, SQL, server library, CLI, browser kit, development emulator, examples and package are implemented and verified **locally** (unit tests, a real local PostgreSQL, Chromium against a synthetic fixture, a clean packed install). No hosted Supabase project, real mail, Google or authenticator run has happened, and the CREDITONE acceptance and the release are not done; section 8 keeps the evidence classes apart. Where this document and the code disagree, the code and its changelog take precedence; the PDF editions under `docs/pdf/` are the original design snapshots and are not updated.
+Status: the design is frozen at contract 0.5. The package is private (`0.0.0`) and nothing is published to npm. The core, SQL, server library, CLI, browser kit, development emulator, examples and package are implemented and verified **locally** (unit tests, a real local PostgreSQL, Chromium against a synthetic fixture, a clean packed install). No hosted Supabase project, real mail, Google or authenticator run has happened, and the acceptance by a consuming site and the release are not done; section 8 keeps the evidence classes apart. Where this document and the code disagree, the code and its changelog take precedence; the PDF editions under `docs/pdf/` are the original design snapshots and are not updated.
 
 ## 1. Purpose and scope
 
@@ -64,7 +64,7 @@ supabase/migrations/  numbered SQL: schema auth_kit (exposed: wrappers, RLS help
 examples/protected-consumer/  minimal Node server proving the contract per role and permission, with its own
                               SQLite link table and the own/any guard.
 examples/rls-consumer/        one consumer table in Supabase Postgres with a policy using the RLS helpers.
-examples/creditone/           the CREDITONE model, page configuration and esbuild build; an example of one
+examples/<client example>/    one client's model, page configuration and esbuild build; an example of one
                               deployment, not an integration into any real site.
 examples/example-studio/      a second, synthetic brand with different role keys, route prefix and build tool (Vite).
 docs/                 this design, the low-level design and the user manual (Markdown, packed with the package;

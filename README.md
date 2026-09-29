@@ -75,7 +75,7 @@ Examples are examples: none of them is part of the package, none is wired into a
 | --- | --- | --- |
 | [`examples/protected-consumer`](examples/protected-consumer) | A generic Node endpoint with its **own SQLite** identity-to-record links (Node's built-in `node:sqlite`), the own/any guard, an audited link table, manager grants with request ids, and fail-closed 503s when SQLite or Supabase is unavailable | `tests/examples/protected-consumer.test.js` (loopback fixture) |
 | [`examples/rls-consumer`](examples/rls-consumer) | One consumer table with Row Level Security policies that call the kit's real `auth_kit.has_permission` helper | `npm run test:examples-sql` (a real local PostgreSQL) |
-| [`examples/creditone`](examples/creditone) | The CREDITONE model, page configuration and an esbuild static-site build. **Not** an integration into the real CREDITONE site | `npm run test:examples-built` |
+| a client-specific example in [`examples/`](examples) | One deployment's model, page configuration and an esbuild static-site build. **Not** an integration into any real site | `npm run test:examples-built` |
 | [`examples/example-studio`](examples/example-studio) | A synthetic second brand: different role keys (`owner`, `editor`, `member`), route prefix and route names, copy and a Vite build, on the same unchanged package | `npm run test:examples-built` |
 
 ## Verification status
@@ -92,7 +92,7 @@ Each result carries its evidence class. A synthetic result is never counted as h
 | Examples | yes | listed above | – |
 | Package | yes | packed, installed and exercised in a clean consumer | publication |
 | Hosted project (Lane 06) | – | – | not run |
-| CREDITONE acceptance (Lane 07) | – | – | not started |
+| Consuming-site acceptance (Lane 07) | – | – | not started |
 | Release acceptance | – | – | not done |
 
 `npm run check` runs the unit tests, the declaration checks and the package check (which also rebuilds the prebuilt assets and compares them with the packed ones). The SQL, browser and example gates need a PostgreSQL build or Chromium and are listed below.
@@ -111,7 +111,7 @@ npm run check               # test + check:types + check:package
 
 npm run test:browser-dom          # Chromium DOM checks of the default screens
 npm run test:browser-integration  # built bundle in Chromium against the emulator
-npm run test:examples-built       # both example builds, installed from the tarball, in Chromium (uses the npm registry for esbuild and Vite)
+npm run test:examples-built       # both example builds in Chromium: locked build tools (npm ci), the packed tarball, hostile brand names
 DWARPAL_PG_BIN=<postgres bin dir> npm run test:sql-server    # server and CLI against a real PostgreSQL
 DWARPAL_PG_BIN=<postgres bin dir> npm run test:examples-sql  # the RLS example
 ```
@@ -120,7 +120,7 @@ DWARPAL_PG_BIN=<postgres bin dir> npm run test:examples-sql  # the RLS example
 
 The [SQL gates](tests/sql/README.md) start a disposable PostgreSQL cluster from separate PostgreSQL binaries; nothing is installed system-wide. Local SQL checks do not establish hosted PostgREST or live Supabase Auth behavior.
 
-Build tooling is development-only: esbuild builds the prebuilt assets, TypeScript checks declarations, `playwright-core` drives Chromium. The package's runtime dependencies are `@supabase/supabase-js` (exact 2.117.2, MIT, for the browser kit) and `jose` (MIT, for the server); a consuming site never needs esbuild.
+Build tooling is development-only: esbuild builds the prebuilt assets, TypeScript checks declarations, `playwright-core` drives Chromium. The package's runtime dependencies are `@supabase/supabase-js` (exact 2.117.2, MIT, for the browser kit) and `jose` (MIT, for the server); a consuming site never needs esbuild. The two example builds lock their own tools (esbuild; Vite and its transitive tree) in `examples/*/package-lock.json`; `npm run test:examples-built` installs exactly those with `npm ci` (from the npm registry, or the npm cache with `--offline`), and none of them is part of the package.
 
 ## Documentation
 

@@ -201,7 +201,7 @@ A user who signed out, or whom you banned or deleted, can keep using the direct 
 </script>
 ```
 
-Load the script from a file instead of inlining it if your Content Security Policy forbids inline scripts (recommended); [`examples/creditone`](../examples/creditone) and [`examples/example-studio`](../examples/example-studio) do so, with a bundler each, and one static page per route.
+Load the script from a file instead of inlining it if your Content Security Policy forbids inline scripts (recommended); the two example builds in the repository's [`examples/`](../examples) directory do so, one with esbuild and one with Vite, and write one static page per route.
 
 **Configuration** is public data: the project URL, the *publishable* key, the site origin, exact allowed return paths, routes, providers, brand and copy. The controller refuses a secret key or a legacy `service_role` key, and the example builds validate the configuration first so a secret key stops the build. The route prefix defaults to `/account`; each route name (`signIn`, `signUp`, `verify`, `callback`, `forgot`, `reset`, `mfa`, `signOut`) maps to one path segment under it and you may rename them. Serve one static page per route.
 
@@ -286,7 +286,7 @@ Runnable examples live in the repository's `examples/` directory (they are not p
 
 - `examples/protected-consumer`: a generic Node endpoint, its own SQLite link table, the own/any guard, fail-closed behaviour (needs `node:sqlite`: Node 22.13 or later, 24 recommended).
 - `examples/rls-consumer`: Row Level Security policies for one table using the kit's helpers.
-- `examples/creditone`: the CREDITONE model and configuration, and an esbuild build of the auth pages. It is an example of one deployment, not part of the kit and not an edit of any real checkout.
+- a client-specific example: one deployment's model and configuration, and an esbuild build of the auth pages. It is an example of one deployment, not part of the kit and not an edit of any real site.
 - `examples/example-studio`: a synthetic second brand with other role keys, route prefix and route names, copy and a Vite build. It runs on the same unchanged package and shows that nothing brand-specific lives in the kit.
 
 ## 14. What has been verified
@@ -294,7 +294,7 @@ Runnable examples live in the repository's `examples/` directory (they are not p
 Every statement in this manual about behaviour has an evidence class. *Local* means unit tests, a real local PostgreSQL (SQL and RLS), real Chromium against a synthetic loopback Auth/RPC fixture (browser flows), a stand-in Management API (installed `migrate`), and a packed-tarball install in a clean consumer. *Hosted* would mean a real Supabase project, and none has been run:
 
 - not yet verified: the Node path against live Supabase Auth, revocation on both paths side by side (the JWT-expiry bound on the direct path), PostgREST refusing calls into `auth_kit_private`, real SMTP delivery, Google sign-in, a real authenticator app, the real Management API (`migrate`, `doctor` catalog mode) and a full `doctor --probe`;
-- not yet done: acceptance by a consuming site (the CREDITONE site) and release acceptance.
+- not yet done: acceptance by a consuming site and release acceptance.
 
 Treat those as open until a hosted verification and the owner's acceptance are recorded.
 

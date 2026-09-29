@@ -43,39 +43,49 @@ const config = validateClientConfig(input);
 // The model and the page configuration must name the same client.
 validateModel(await readJson('auth-model.json'), { clientId: config.clientId });
 
+// Every configured value is text in the pages, never markup: the brand name may
+// be any string of up to 128 characters, including `<`, `&` and quotes.
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
 const outDir = resolve(here, env.OUT_DIR ?? 'dist');
 const stage = `${outDir}.tmp-${process.pid}`;
 await rm(stage, { recursive: true, force: true });
 await mkdir(join(stage, 'assets'), { recursive: true });
+const files = [];
 
-await build({
-  entryPoints: { account: join(here, 'src/account.js') },
-  outdir: join(stage, 'assets'),
-  bundle: true,
-  format: 'esm',
-  platform: 'browser',
-  target: ['es2022'],
-  minify: true,
-  sourcemap: false,
-  absWorkingDir: here,
-  charset: 'utf8',
-  logLevel: 'silent',
-  define: { __AUTH_CONFIG__: JSON.stringify(input) },
-});
+// A failure anywhere before the swap below (bundling, page writing, the scan)
+// removes the staging directory and leaves the previous dist/ as it was.
+try {
+  await build({
+    entryPoints: { account: join(here, 'src/account.js') },
+    outdir: join(stage, 'assets'),
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    target: ['es2022'],
+    minify: true,
+    sourcemap: false,
+    absWorkingDir: here,
+    charset: 'utf8',
+    logLevel: 'silent',
+    define: { __AUTH_CONFIG__: JSON.stringify(input) },
+  });
 
-// One small static page per route; each loads the same script. No inline
-// script or style, so a strict Content-Security-Policy works unchanged.
-const asset = (name) => `${config.routes.prefix}/assets/${name}`;
-for (const name of ROUTE_NAMES) {
-  const path = join(stage, relative(config.routes.prefix, config.routes[name]), 'index.html');
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `<!doctype html>
+  // One small static page per route; each loads the same script. No inline
+  // script or style, so a strict Content-Security-Policy works unchanged.
+  const asset = (name) => escapeHtml(`${config.routes.prefix}/assets/${name}`);
+  for (const name of ROUTE_NAMES) {
+    const path = join(stage, relative(config.routes.prefix, config.routes[name]), 'index.html');
+    const title = escapeHtml(`${TITLES[name]} | ${config.brand.name}`);
+    const description = escapeHtml(`${TITLES[name]} to your ${config.brand.name} account.`);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${TITLES[name]} | ${config.brand.name}</title>
-<meta name="description" content="${TITLES[name]} to your ${config.brand.name} account.">
+<title>${title}</title>
+<meta name="description" content="${description}">
 <meta name="robots" content="noindex, nofollow">
 <link rel="stylesheet" href="${asset('account.css')}">
 </head>
@@ -85,21 +95,26 @@ for (const name of ROUTE_NAMES) {
 </body>
 </html>
 `);
+  }
+
+  // Nothing secret may reach the output.
+  for (const entry of await readdir(stage, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) files.push(join(entry.parentPath, entry.name));
+  }
+  files.sort();
+  for (const file of files) {
+    const text = await readFile(file, 'utf8');
+    const hit = FORBIDDEN.find((pattern) => pattern.test(text));
+    if (hit) throw new Error(`build: forbidden marker ${hit} in ${relative(stage, file)}`);
+  }
+} catch (error) {
+  await rm(stage, { recursive: true, force: true });
+  throw error;
 }
 
-// Nothing secret may reach the output.
-const files = [];
-for (const entry of await readdir(stage, { recursive: true, withFileTypes: true })) {
-  if (entry.isFile()) files.push(join(entry.parentPath, entry.name));
-}
-files.sort();
-for (const file of files) {
-  const text = await readFile(file, 'utf8');
-  const hit = FORBIDDEN.find((pattern) => pattern.test(text));
-  if (hit) throw new Error(`build: forbidden marker ${hit} in ${relative(stage, file)}`);
-}
-
-// Swap in only a finished build: a failed run leaves the previous dist untouched.
+// Swap in the finished build. This is not atomic: the previous dist/ is
+// removed first, so a run that fails or is killed between these two steps
+// leaves no dist/ (and the finished build in the staging directory); build again.
 await rm(outDir, { recursive: true, force: true });
 await rename(stage, outDir);
 for (const file of files) {
