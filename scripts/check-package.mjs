@@ -56,14 +56,13 @@ const REQUIRED_FILES = [
   ...MIGRATIONS.map((n) => `supabase/migrations/${n}`),
   ...DIST_FILES,
 ];
-// Things that must never be in a published file: personal or host paths, private
-// notes and real key values. (Operator code and docs name the environment
-// variables, never a value.)
+// Things that must never be in a published file: home paths, private notes and
+// real key values. The private repository boundary policy checks owner names;
+// they do not belong as literals in public package-check source.
 const LEAK_PATTERNS = [
   ['a home directory path', /\/home\/[a-z][\w.-]*\//],
   ['a macOS or Windows user path', /(?:\/Users\/|[A-Z]:\\Users\\)[\w.-]+/],
   ['a private-notes path', /\b(?:internal|scratch)\/(?:records|scratch|agent)\b/],
-  ['an operator identity', /max-stravion|shreetravion|maxstravion/i],
   ['a secret key value', /sb_secret_[A-Za-z0-9_-]{20,}/],
   ['a Management token value', /sbp_[A-Za-z0-9]{30,}/],
   ['a service-role JWT', /eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
