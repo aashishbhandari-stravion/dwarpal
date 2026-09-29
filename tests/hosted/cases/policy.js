@@ -6,6 +6,7 @@
 import { attempt, ensureClient, bootstrap, signedInMember, managerWrite, fresh } from '../lib/world.js';
 import { rlsModel, exampleModel } from '../lib/fixtures.js';
 import { HostedError } from '../lib/hosted.js';
+import { rowTitle } from '../lib/rows.js';
 
 const KEYS = ['notes:read:own', 'notes:read:any', 'notes:write:own', 'notes:write:any', 'members:manage'];
 const UNKNOWN = 'notes:unknown:key';
@@ -31,11 +32,18 @@ function expectHelpers(granted, roles) {
   return out;
 }
 
+/**
+ * One note owned by the token's user. The intent is on disk before the
+ * insert; the title carries the run marker, so a note whose insert committed
+ * but whose answer was lost is still found and settled by cleanup.
+ */
 export async function insertNote(ctx, alias, token) {
-  ctx.ledger.intent('notes', `${alias}`);
-  const o = await ctx.hosted.rest.insert(token, 'app', 'notes', { title: `hv${ctx.runId} ${alias}`, body: '' });
-  if (o.kind !== 'value' || !Array.isArray(o.value) || o.value.length !== 1) throw new HostedError('insert_note', o.status, o.code ?? null);
-  ctx.ledger.created('notes', `${alias}`, { noteId: o.value[0].id });
+  ctx.ledger.intent('notes', alias);
+  const o = await ctx.hosted.rest.insert(token, 'app', 'notes', { title: rowTitle(ctx.runId, alias), body: '' });
+  if (o.kind !== 'value' || !Array.isArray(o.value) || o.value.length !== 1 || !Number.isInteger(o.value[0]?.id)) {
+    throw new HostedError('insert_note', o.status, o.code ?? null);
+  }
+  ctx.ledger.created('notes', alias, { rowId: o.value[0].id });
   return o.value[0].id;
 }
 

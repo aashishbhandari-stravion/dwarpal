@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const LEDGER_KINDS = Object.freeze(['user', 'client', 'notes', 'grant_widening', 'fault_trigger']);
+export const LEDGER_KINDS = Object.freeze(['user', 'client', 'notes', 'orders', 'grant_widening', 'fault_trigger']);
 const KIND_SET = new Set(LEDGER_KINDS);
 const KEY = /^[A-Za-z0-9_.:@-]{1,128}$/;
 

@@ -1,6 +1,7 @@
 // Per-run clients and models. Every client id carries the run prefix, so
-// runs never share kit state except for the fixed `rls-demo` client that the
-// example consumer's policies name. Models are stated here, next to the
+// runs never share kit state except for the fixed clients whose installed
+// policies name them: `rls-demo` (examples/rls-consumer) and `orders-demo`
+// (the L26 fixture). Models are stated here, next to the
 // cases that depend on their exact roles and keys.
 
 import fs from 'node:fs';
@@ -8,10 +9,16 @@ import path from 'node:path';
 import { PUBLIC_ROOT } from './paths.js';
 
 export const RLS_CLIENT = 'rls-demo';
+export const ORDERS_CLIENT = 'orders-demo';
+/** Clients whose ids are fixed by installed policies, shared by every run. */
+export const FIXED_CLIENTS = Object.freeze([RLS_CLIENT, ORDERS_CLIENT]);
 
 export function clientIds(runId) {
   const p = `hv${runId}`;
-  return { A: `${p}-a`, B: `${p}-b`, D: `${p}-d`, E: `${p}-e`, F: `${p}-f`, F2: `${p}-f2`, G: `${p}-g`, R: `${p}-r`, RLS: RLS_CLIENT };
+  return {
+    A: `${p}-a`, B: `${p}-b`, D: `${p}-d`, E: `${p}-e`, F: `${p}-f`, F2: `${p}-f2`, G: `${p}-g`, R: `${p}-r`,
+    PW: `${p}-p`, PWC: `${p}-pc`, PWN: `${p}-pn`, RLS: RLS_CLIENT, ORD: ORDERS_CLIENT,
+  };
 }
 
 function readModel(rel) {
@@ -38,6 +45,11 @@ export function rlsModel() {
   return readModel('examples/rls-consumer/auth-model.json');
 }
 
+/** L26: customer (own orders), MFA-required staff (any order), MFA-required manager. */
+export function ordersModel() {
+  return readModel('tests/hosted/fixtures/orders-consumer/auth-model.json');
+}
+
 /** L34: two manager roles, one without and one with MFA. */
 export function managersModel(clientId) {
   return {
@@ -49,6 +61,19 @@ export function managersModel(clientId) {
       member: { self_assignable: true, permissions: ['items:read:own'] },
     },
     permissions: { 'members:manage': 'grant and revoke', 'items:read:any': 'all items', 'items:read:own': 'own items' },
+  };
+}
+
+/** The browser flows: a manager without MFA, an MFA-required staff role, a self-assignable member. */
+export function browserModel(clientId) {
+  return {
+    client: clientId,
+    roles: {
+      keeper: { manages_members: true, permissions: ['members:manage', 'pages:read:any'] },
+      staff: { mfa_required: true, permissions: ['pages:read:any'] },
+      member: { self_assignable: true, permissions: ['pages:read:own'] },
+    },
+    permissions: { 'members:manage': 'grant and revoke', 'pages:read:any': 'all pages', 'pages:read:own': 'own pages' },
   };
 }
 

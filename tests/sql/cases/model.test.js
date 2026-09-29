@@ -26,14 +26,27 @@ async function currentModel(db, client) {
   return exported.model_json === null ? null : JSON.parse(exported.model_json);
 }
 
-/** Dry-run in SQL and planModelChange in core must agree exactly. */
+/** Current holders of the client's manager roles, deduplicated and sorted (the L29 affected holders). */
+function managerHolders(current, held) {
+  const ids = Object.keys(current?.roles ?? {}).filter((role) => current.roles[role].manages_members === true).flatMap((role) => held[role] ?? []);
+  return [...new Set(ids)].sort();
+}
+
+/**
+ * Dry-run in SQL and planModelChange in core must agree exactly, except that
+ * SQL's no_manager_would_remain refusal also names the affected holders
+ * (L29), which core's plan does not carry.
+ */
 async function assertPlanParity(db, client, next, label) {
-  const plan = planModelChange(await currentModel(db, client), next, { state: await state(db, client), holders: await holders(db, client) });
+  const current = await currentModel(db, client);
+  const held = await holders(db, client);
+  const plan = planModelChange(current, next, { state: await state(db, client), holders: held });
   const dry = await applyModel(db, client, next, { dryRun: true });
   assert.equal(dry.result, 'dry_run', label);
   assert.equal(dry.changed, plan.changed, `${label}: changed`);
   assert.deepEqual(dry.diff, JSON.parse(JSON.stringify(plan.diff)), `${label}: diff`);
-  assert.deepEqual(dry.refusals, JSON.parse(JSON.stringify(plan.refusals)), `${label}: refusals`);
+  const expected = JSON.parse(JSON.stringify(plan.refusals)).map((r) => (r.rule === 'no_manager_would_remain' ? { ...r, holders: managerHolders(current, held) } : r));
+  assert.deepEqual(dry.refusals, expected, `${label}: refusals`);
   return dry;
 }
 
@@ -227,10 +240,10 @@ test('a live client keeps an assigned manager; the same models apply on a regist
   await bootstrap(db, steward, 'studio', 'steward');
   const before = await snapshot(db);
   const stripped = await refusal(applyModel(db, 'studio', strip), 'model_refused');
-  assert.deepEqual(JSON.parse(stripped.detail), { refusals: [{ rule: 'no_manager_would_remain' }] });
+  assert.deepEqual(JSON.parse(stripped.detail), { refusals: [{ rule: 'no_manager_would_remain', holders: [steward] }] });
   const dropped = await refusal(applyModel(db, 'studio', drop), 'model_refused');
   assert.deepEqual(JSON.parse(dropped.detail), { refusals: [
-    { rule: 'role_held', role: 'steward', holders: [steward] }, { rule: 'no_manager_would_remain' },
+    { rule: 'role_held', role: 'steward', holders: [steward] }, { rule: 'no_manager_would_remain', holders: [steward] },
   ] });
   assert.deepEqual(await snapshot(db), before);
   // Dropping the unheld manager role keeps the held one: allowed.
@@ -239,6 +252,22 @@ test('a live client keeps an assigned manager; the same models apply on a regist
   keep.permissions = { ...keep.permissions };
   delete keep.permissions['reports:read'];
   assert.equal((await applyModel(db, 'studio', keep)).result, 'applied');
+
+  // Two holders across two manager roles (one holds both): each named once,
+  // in order; holders of other roles are not named; still nothing written.
+  await register(db, 'duo');
+  await applyModel(db, 'duo', exampleModel('duo'));
+  const first = await db.createUser();
+  const second = await db.createUser();
+  const reader = await db.createUser();
+  await bootstrap(db, first, 'duo', 'steward');
+  await bootstrap(db, first, 'duo', 'owner');
+  await bootstrap(db, second, 'duo', 'owner');
+  assert.equal((await join(db, reader, 'duo')).result, 'enrolled');
+  const wider = await snapshot(db);
+  const both = await refusal(applyModel(db, 'duo', { ...structuredClone(strip), client: 'duo' }), 'model_refused');
+  assert.deepEqual(JSON.parse(both.detail), { refusals: [{ rule: 'no_manager_would_remain', holders: [first, second].sort() }] });
+  assert.deepEqual(await snapshot(db), wider);
 }));
 
 test('export: canonical file text for the applied model, null before any model, unknown client refused', () => withDatabase(async (db) => {

@@ -27,7 +27,9 @@ export const CAPABILITIES = Object.freeze({
   management_token: 'SUPABASE_ACCESS_TOKEN (Management API personal access token)',
   smtp_recipient: 'identities.smtpRecipients in the target descriptor',
   google_identity: 'identities.google in the target descriptor',
+  doctor_config: 'doctor.configFile in the target descriptor: a valid consumer config for this project (doctor --config; required for complete D1 catalog proof)',
   interactive: '--interactive on a terminal',
+  chromium: 'the Chromium build playwright-core expects, installed locally (the hosted Playwright suite)',
 });
 
 // Clients the harness creates, per run: `<prefix>` is a fresh run prefix.
@@ -38,7 +40,11 @@ export const CLIENTS = Object.freeze({
   E: 'L27 enrollment client: self-assignable `member`, later a second self-assignable role',
   F: 'L29 registered client with no holders; L30 apply_model',
   G: 'L32 bootstrap target, registered only until the confirmed --user-id run',
+  PW: 'browser flows: open client with a non-MFA manager role, an MFA-required staff role and a self-assignable member',
+  PWC: 'browser flows: the same model, invite-only (closed signup)',
+  PWN: 'browser flows: registered with no model (no self-assignable role)',
   RLS: 'the fixed client `rls-demo` of examples/rls-consumer (its policies name it); shared across runs',
+  ORD: 'the fixed client `orders-demo` of the L26 fixture tests/hosted/fixtures/orders-consumer (its policy names it); shared across runs',
 });
 
 export const ACTORS = Object.freeze([
@@ -83,12 +89,23 @@ export const ACTORS = Object.freeze([
   { id: 'r_other', kind: 'R: second target for conflicting payloads (L30)' },
   { id: 'r_target2', kind: 'R: bootstrap and revoke_manager target (L30)' },
   { id: 'r_joiner', kind: 'R: joins twice (L30 natural keys)' },
-  { id: 'dup_one', kind: 'L32: address reused with different case to attempt a duplicate' },
   { id: 'lookup_email', kind: 'L32: unique confirmed --email match' },
   { id: 'l34_t1', kind: 'D: grant target of U1' },
   { id: 'l34_t2', kind: 'D: grant target of U2' },
   { id: 'l34_t3', kind: 'D: grant target of U3 and of the non-manager' },
   { id: 'totp_user', kind: 'D: chief (MFA role); TOTP enrol, challenge, verify and self-unenrol' },
+  { id: 'ord_manager', kind: 'orders-demo manager (MFA), TOTP factor, aal2; grants staff (L26)' },
+  { id: 'ord_customer', kind: 'orders-demo customer (join) and staff (manager grant), TOTP factor; aal1 and aal2 (L26)' },
+  { id: 'ord_other', kind: 'orders-demo customer who owns the other order (L26)' },
+  { id: 'pw_manager', kind: 'PW keeper (bootstrap, no MFA): grants and revokes for the browser flows' },
+  { id: 'pw_member', kind: 'PW member: browser sign-in, return path, failures and sign-out' },
+  { id: 'pw_closed', kind: 'signs in on the invite-only client PWC in the browser: no_access' },
+  { id: 'pw_nodefault', kind: 'signs in on PWN (no model) in the browser: setup_pending' },
+  { id: 'pw_revoked', kind: 'PW member whose membership a manager revokes; browser shows no_access' },
+  { id: 'pw_mfa', kind: 'PW member and staff (MFA): browser TOTP enrolment, then a challenge' },
+  { id: 'pw_verify', kind: 'unconfirmed user from an admin-generated signup link, confirmed in the browser' },
+  { id: 'pw_recover', kind: 'confirmed user who resets the password from an admin-generated recovery link in the browser' },
+  { id: 'pw_nobody', kind: 'an address with no user: the browser sign-in failure is neutral' },
 ]);
 
 const BASE = { needs: ['publishable_key', 'secret_key'], authorize: ['connect'] };
@@ -126,6 +143,7 @@ export const CASES = Object.freeze([
     ['T.schema', '4.2', ['management'], 'installed migration versions equal the repository files; grant assertion empty', { needs: MGMT.needs }],
     ['T.exposed_schemas', 'R4', ['management'], 'exposed schemas include auth_kit and app and never auth_kit_private', { needs: MGMT.needs }],
     ['T.rls_consumer', 'F4', ['management'], 'examples/rls-consumer installed: app.notes, forced RLS, four policies', { needs: MGMT.needs }],
+    ['T.orders_consumer', 'L26', ['management'], 'the L26 fixture installed: app.orders, forced RLS, the own/any orders_select policy on orders-demo, SELECT only for authenticated, nothing for anon', { needs: MGMT.needs }],
   ]),
 
   // HTTP routing versus SQL EXECUTE (R4, L28, 5.1).
@@ -166,6 +184,15 @@ export const CASES = Object.freeze([
     ['M.manager_promotes_manager', 'D17', ['postgrest'], 'a manager granting a manages_members role is refused, nothing written'],
     ['M.self_target', '4.2', ['postgrest'], 'a manager granting to self is refused, nothing written'],
     ['M.operator_wrappers_as_user', '4.2', ['postgrest'], 'operator wrappers over HTTP as anon and authenticated: permission denied'],
+  ]),
+
+  // L26 own/any order guard on the Node path and the RLS path, at aal1 and aal2 (4.3, S4, S4b).
+  ...group('orders', { needs: MGMT.needs, authorize: [...WRITE.authorize, 'totp'] }, [
+    ['L26.aal1.node', 'L26', ['node'], 'customer + MFA-pending staff at aal1, Node guard: another customer\'s order 403 forbidden with staff withheld; own order 200'],
+    ['L26.aal1.rls', 'L26', ['postgrest'], 'the same token through the orders RLS policy: another customer\'s order zero rows; own order the row'],
+    ['L26.aal2.node', 'L26', ['node'], 'after aal2, Node guard: both orders 200'],
+    ['L26.aal2.rls', 'L26', ['postgrest'], 'after aal2, RLS policy: both orders visible'],
+    ['L26.absent_and_anon', 'L26', ['node', 'postgrest'], 'an absent order is 404 and no token is 401 on the Node path; anon is refused on the direct path'],
   ]),
 
   // L25 and the direct-path revocation guarantees (5.14, D20).
@@ -218,7 +245,6 @@ export const CASES = Object.freeze([
   // L32 bootstrap-manager lookups (CLI and library against the real Admin API).
   ...group('bootstrap', { needs: WRITE.needs, authorize: WRITE.authorize }, [
     ['L32.email_zero_matches', 'L32', ['cli'], '--email with no confirmed match in a complete listing: unknown_user, nothing written'],
-    ['L32.email_two_matches', 'L32', ['cli'], 'two confirmed matches: Supabase Auth keeps e-mail addresses unique, so this state cannot be created on a hosted project; attempted and recorded, disposition required', { required: false }],
     ['L32.lookup_incomplete', 'L32', ['auth'], 'listing with page size 1 and cap 2 over three or more users: lookup_incomplete, nothing written, --user-id named'],
     ['L32.user_id_unconfirmed', 'L32', ['cli'], '--user-id of an unconfirmed user: email_unverified, nothing written'],
     ['L32.user_id_confirmed', 'L32', ['cli', 'sql'], '--user-id of a confirmed user: granted, client state live'],
@@ -228,11 +254,11 @@ export const CASES = Object.freeze([
   // L33 doctor modes (D1 amendment A).
   ...group('doctor', { needs: WRITE.needs, authorize: WRITE.authorize }, [
     ['L33.secret_only_incomplete', 'L33', ['cli'], 'secret key only: privileged catalog checks not_run, overall incomplete (exit 5); public signing-key check runs'],
-    ['L33.catalog_ok', 'L33', ['cli', 'management'], 'with the Management token: catalog inspects grants, schema, exposed schemas, redirects; ok', { needs: MGMT.needs }],
+    ['L33.catalog_ok', 'L33', ['cli', 'management'], 'with the Management token and the consumer config: grants, schema, memberships, exposed schemas, redirect allow-list and client registration all ran and passed', { needs: [...MGMT.needs, 'doctor_config'] }],
     ['L33.probe_mode', 'L33', ['cli', 'postgrest'], '--probe with a disposable user: anon and authenticated outcomes in a separate probe mode', { needs: MGMT.needs }],
-    ['L33.catalog_detects_widening', 'L33', ['cli', 'management'], 'a deliberately widened grant is reported by catalog mode', { needs: MGMT.needs, authorize: [...WRITE.authorize, 'catalog_mutation'] }],
+    ['L33.catalog_detects_widening', 'L33', ['cli', 'management'], 'a deliberately widened grant is reported by complete catalog mode', { needs: [...MGMT.needs, 'doctor_config'], authorize: [...WRITE.authorize, 'catalog_mutation'] }],
     ['L33.probe_detects_widening', 'L33', ['cli', 'postgrest'], 'a probe-observable widened grant is reported by probe mode', { needs: MGMT.needs, authorize: [...WRITE.authorize, 'catalog_mutation'] }],
-    ['L33.widening_reverted', 'L33', ['management'], 'every widened grant is revoked and the grant assertion is empty again', { needs: MGMT.needs, authorize: [...WRITE.authorize, 'catalog_mutation'] }],
+    ['L33.widening_reverted', 'L33', ['management'], 'every widened grant is revoked; the grant assertion is empty and complete catalog mode is ok again', { needs: [...MGMT.needs, 'doctor_config'], authorize: [...WRITE.authorize, 'catalog_mutation'] }],
   ]),
 
   // L34 two manager roles on client D.
@@ -250,6 +276,18 @@ export const CASES = Object.freeze([
     ['L35.b', 'L35', ['auth', 'sql'], 'retry after success: stored result, no admin API call, nothing written'],
     ['L35.c', 'L35', ['auth', 'sql'], 'another user with the same id: request_conflict before any admin call, U2 untouched'],
     ['L35.d', 'L35', ['auth', 'sql'], 'two concurrent runs: one proceeds, the other request_in_progress before any admin call'],
+  ]),
+
+  // The hosted Playwright suite: the browser kit in Chromium against the target (design 8).
+  ...group('browser', { needs: [...WRITE.needs, 'chromium'], authorize: [...WRITE.authorize, 'totp'] }, [
+    ['PW.sign_in_redirect', '7', ['browser', 'auth', 'postgrest'], 'browser sign-in joins once; an external return path falls back to the default, an allowed one is kept'],
+    ['PW.sign_in_failures', '7', ['browser', 'auth'], 'wrong password and unknown address: the same invalid_credentials; no session stored'],
+    ['PW.enrollment_states', 'L27', ['browser', 'postgrest'], 'invite-only client: no_access; client without a self-assignable role: setup_pending with a retry'],
+    ['PW.revoked_no_access', 'L27', ['browser', 'postgrest'], 'after a manager revoke, a new browser sign-in shows no_access and re-grants nothing'],
+    ['PW.mfa', '10', ['browser', 'auth'], 'MFA role withheld at aal1; TOTP enrolment in the browser reaches aal2; the next sign-in is challenged and passes'],
+    ['PW.verify_link', '7', ['browser', 'auth'], 'a signup link: stripped from the address bar, not consumed by loading, confirmed by one click; reopened it is expired_link'],
+    ['PW.recovery', '7', ['browser', 'auth'], 'a recovery link: reset pending (a second tab stays confined), new password set, old refused, new accepted'],
+    ['PW.sign_out', '5.12', ['browser', 'auth', 'node'], 'browser sign-out clears every kit key and the Node path refuses the signed-out token on the next request'],
   ]),
 
   // Providers.
@@ -276,7 +314,9 @@ export const CASES = Object.freeze([
 /** Cases whose non-hosted evidence comes from earlier lanes and are not rerun here. */
 export const EARLIER_LANE_EVIDENCE = Object.freeze([
   { lld: 'L35', cases: '(e)-(i)', evidence: 'mocked admin API and fake clock (tests/server/mfa-reset.test.js) and SQL claim gates (tests/server/sql/mfa-reset.test.js, tests/sql/cases)', rerun: 'only when a concrete gap requires it' },
-  { lld: 'L26', cases: 'all', evidence: 'unit and SQL (tests/core, tests/examples/sql)', rerun: 'not in the hosted brief; see README open questions' },
+  // The owner's L32 disposition (2026-09-29): two confirmed users with one address is not a valid hosted Supabase state,
+  // so it is neither created nor counted here; the refusal stays a defensive unit/CLI test with an injected listing.
+  { lld: 'L32', cases: 'ambiguous_user (two confirmed matches)', evidence: 'injected duplicate admin listing (tests/cli/cli.test.js, tests/server/operator.test.js)', rerun: 'never on a hosted project; unit/CLI evidence, not hosted proof' },
 ]);
 
 /** Checks the inventory's own integrity; returns a list of problems. */

@@ -4,6 +4,7 @@
 import { procedures as target } from '../cases/target.js';
 import { procedures as routing } from '../cases/routing.js';
 import { procedures as policy } from '../cases/policy.js';
+import { procedures as orders } from '../cases/orders.js';
 import { procedures as matrix } from '../cases/matrix.js';
 import { procedures as revocation } from '../cases/revocation.js';
 import { procedures as enrollment } from '../cases/enrollment.js';
@@ -14,6 +15,7 @@ import { procedures as bootstrap } from '../cases/bootstrap.js';
 import { procedures as managers } from '../cases/managers.js';
 import { procedures as mfaReset } from '../cases/mfa-reset.js';
 import { procedures as doctor } from '../cases/doctor.js';
+import { procedures as browser } from '../cases/browser.js';
 import { procedures as providers } from '../cases/providers.js';
 import { procedures as cleanup } from '../cases/cleanup.js';
 
@@ -24,6 +26,7 @@ export const PROCEDURES = Object.freeze([
   revocationStart,
   ...routing,
   ...policy,
+  ...orders,
   ...matrix,
   ...enrollment,
   ...model,
@@ -33,6 +36,7 @@ export const PROCEDURES = Object.freeze([
   ...managers,
   ...mfaReset,
   ...doctor,
+  ...browser,
   ...providers,
   revocationFinish,
   ...cleanup,

@@ -110,6 +110,8 @@ export function createHosted({ gate, target, creds, redactor, limits = {}, sleep
   const adminHeaders = { apikey: sec, Authorization: `Bearer ${sec}` };
 
   const auth = {
+    /** Takes one sign-in from the shared budget for a sign-in the harness's browser makes. */
+    reserveSignIn: throttle,
     async jwks() {
       return call(`${origin}/auth/v1/.well-known/jwks.json`);
     },
@@ -177,9 +179,20 @@ export function createHosted({ gate, target, creds, redactor, limits = {}, sleep
       if (res.status !== 200 && res.status !== 201) throw new HostedError('create_user', res.status, res.json?.error_code ?? null);
       return { id: String(res.json.id).toLowerCase() };
     },
-    async createUserRaw(email, password) {
-      const res = await call(`${origin}${ADMIN_USERS}`, { method: 'POST', headers: adminHeaders, body: { email, password, email_confirm: true } });
-      return { status: res.status, errorCode: res.json?.error_code ?? null, id: typeof res.json?.id === 'string' ? res.json.id.toLowerCase() : null };
+    /**
+     * A verification link's token hash, generated for the harness itself:
+     * Auth sends no mail for it. `signup` creates an unconfirmed user.
+     */
+    async generateLink(type, email, password) {
+      const res = await call(`${origin}/auth/v1/admin/generate_link`, { method: 'POST', headers: adminHeaders, body: { type, email, ...(password ? { password } : {}) } });
+      const body = res.json ?? {};
+      const tokenHash = body.hashed_token ?? body.properties?.hashed_token;
+      for (const secret of [tokenHash, body.email_otp ?? body.properties?.email_otp, body.action_link ?? body.properties?.action_link]) {
+        if (typeof secret === 'string' && secret.length >= 6) redactor.secret(secret, 'link');
+      }
+      const id = body.id ?? body.user?.id;
+      if (res.status !== 200 || typeof tokenHash !== 'string' || typeof id !== 'string') throw new HostedError('generate_link', res.status, body.error_code ?? null);
+      return { tokenHash, userId: id.toLowerCase() };
     },
     async deleteUser(id) {
       const res = await call(`${origin}${ADMIN_USERS}/${id}`, { method: 'DELETE', headers: adminHeaders });
@@ -290,8 +303,13 @@ export function createHosted({ gate, target, creds, redactor, limits = {}, sleep
     });
   }
 
-  /** The Node path: createAuthServer behind a loopback HTTP endpoint that maps errors like the example consumer. */
-  async function nodeEndpoint(clientId, { fetch: fetchImpl = fetch, now = clockNow } = {}) {
+  /**
+   * The Node path: createAuthServer behind a loopback HTTP endpoint that maps
+   * errors like the example consumer. Without `handle` it answers with the
+   * resolved principal; with it, `handle(principal, url)` is the consumer's
+   * own route (for example the L26 order guard) and returns { status, body }.
+   */
+  async function nodeEndpoint(clientId, { fetch: fetchImpl = fetch, now = clockNow, handle = null } = {}) {
     const server = createAuthServer({ supabaseUrl: origin, publishableKey: pub, clientId, fetch: fetchImpl, now });
     const STATUS = { no_token: 401, invalid_token: 401, expired: 401, email_unverified: 403, mfa_required: 403, forbidden: 403, request_conflict: 409, unavailable: 503 };
     const httpServer = http.createServer(async (req, res) => {
@@ -299,7 +317,8 @@ export function createHosted({ gate, target, creds, redactor, limits = {}, sleep
       let body;
       try {
         const principal = await server.resolveSession(req);
-        body = principal === null ? { principal: null } : { principal };
+        if (handle) ({ status, body } = await handle(principal, new URL(req.url ?? '/', 'http://localhost')));
+        else body = principal === null ? { principal: null } : { principal };
       } catch (error) {
         status = isAuthError(error) && Object.hasOwn(STATUS, error.code) ? STATUS[error.code] : 500;
         body = { error: isAuthError(error) ? error.code : 'internal' };
@@ -314,8 +333,8 @@ export function createHosted({ gate, target, creds, redactor, limits = {}, sleep
     return {
       server,
       // The harness's own loopback endpoint, not target traffic: reached directly, not through the gate.
-      async get(token) {
-        const res = await request(globalThis.fetch, url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES });
+      async get(token, pathname = '/') {
+        const res = await request(globalThis.fetch, new URL(pathname, url).href, { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES });
         return { status: res.status, body: tryParseJson(res.text) };
       },
       close: () => new Promise((resolve) => httpServer.close(resolve)),

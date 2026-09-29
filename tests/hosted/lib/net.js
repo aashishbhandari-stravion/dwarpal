@@ -53,6 +53,25 @@ export function createGate({ fetch: inner = globalThis.fetch, onCall = () => {},
     get isOpen() {
       return allowed !== null;
     },
+    /**
+     * For a browser the harness drives: whether it may reach `origin` (only
+     * while open, and only an authorized origin or one of the harness's own
+     * loopback sites), and a log entry for each request it made.
+     */
+    admits(origin, loopbackSites = []) {
+      if (allowed === null) return false;
+      return allowed.has(origin) || loopbackSites.includes(origin);
+    },
+    record({ method, url, status, blocked = false }) {
+      const u = new URL(url);
+      const loopback = LOOPBACK.test(u.origin);
+      if (!blocked) {
+        counts.total += 1;
+        counts.byOrigin.set(u.origin, (counts.byOrigin.get(u.origin) ?? 0) + 1);
+      }
+      // A loopback page address can carry a link token: its query is never logged.
+      onCall({ via: 'browser', method, origin: loopback ? 'loopback' : u.origin, path: loopback ? u.pathname : `${u.pathname}${u.search}`, status, ...(blocked ? { blocked: true } : {}) });
+    },
     /** A hook run before each request is sent (tests of in-flight state use it). */
     setTap(fn) {
       tap = fn;

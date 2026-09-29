@@ -1,6 +1,6 @@
 # Hosted verification harness
 
-Checks the kit against a real, isolated Supabase project: HTTP routing versus SQL `EXECUTE`, the live actor and model matrix, the two revocation paths, enrollment, model refusals, request ids, client scope, manager bootstrap, `doctor` modes, manager authority, the operator MFA reset, and the provider flows (TOTP, real SMTP delivery, an interactive Google sign-in). The case list, with the design reference, access path, inputs and authorization each case needs, is in [`lib/inventory.js`](lib/inventory.js); print it with `node tests/hosted/run.js inventory`.
+Checks the kit against a real, isolated Supabase project: HTTP routing versus SQL `EXECUTE`, the live actor and model matrix, the two revocation paths, the own/any order guard on the Node and RLS paths (L26), enrollment, model refusals, request ids, client scope, manager bootstrap, `doctor` modes, manager authority, the operator MFA reset, the browser kit in Chromium (the hosted Playwright suite), and the provider flows (TOTP, real SMTP delivery, an interactive Google sign-in). The case list, with the design reference, access path, inputs and authorization each case needs, is in [`lib/inventory.js`](lib/inventory.js); print it with `node tests/hosted/run.js inventory`.
 
 Nothing in this directory counts a fake, an emulator, a skipped case or a local PostgreSQL run as hosted proof. The self-tests and the local rehearsal below exercise the harness itself; their results are never hosted results.
 
@@ -11,13 +11,13 @@ Nothing in this directory counts a fake, an emulator, a skipped case or a local 
 | `passed` | Executed in `run` mode against the authorized target; every assertion held, each with an evidence reference. |
 | `failed` | Executed and an assertion did not hold, the platform contradicted the design, or the harness broke after hosted effects began. |
 | `blocked` | Could not execute: an input, credential, authorization or target prerequisite is missing, a rate limit was not lifted, or an outcome became unknown. |
-| `not_run` | Not attempted in this run: not selected, or waiting for a recorded disposition. |
+| `not_run` | Not attempted in this run: not selected, or recorded without hosted provenance (a rehearsal). |
 
 The run's verdict is `passed` only when every required case passed. Any failed required case, or any record the inventory does not know, makes it `failed`; otherwise it is `incomplete`. A case with no record is `not_run`; a case its procedure never reported is `failed` (`not_reported`); a pass without assertions or evidence references is `failed` (`invalid_pass_record`); a pass recorded without hosted provenance is `not_run` (`not_hosted`).
 
 ## Fail-closed gates
 
-1. **No network before authorization.** Every request goes through one gate ([`lib/net.js`](lib/net.js)) that starts closed. It opens only for the origins [`lib/target.js`](lib/target.js) returns after checking the descriptor, the credentials and the confirmation. `inventory`, `plan` and a refused `run` make no network call.
+1. **No network before authorization.** Every request goes through one gate ([`lib/net.js`](lib/net.js)) that starts closed. It opens only for the origins [`lib/target.js`](lib/target.js) returns after checking the descriptor, the credentials and the confirmation. The Chromium the browser suite drives is fenced by the same gate: each of its requests is checked before it leaves and may reach only the project and the harness's own loopback pages; anything else is aborted and logged as blocked. `inventory`, `plan` and a refused `run` make no network call.
 2. **Authorization is explicit and per class.** The descriptor records where the owner authorized the target, that the project is isolated, disposable and free of production data, an expiry, and the classes of external action allowed. A case whose class is not listed is `blocked`.
 
    | Class | Allows |
@@ -33,21 +33,25 @@ The run's verdict is `passed` only when every required case passed. Any failed r
 
 3. **The invocation names the project.** `DWARPAL_HOSTED_CONFIRM_REF` must equal the descriptor's project ref, and `SUPABASE_URL` must be exactly `https://<ref>.supabase.co`.
 4. **The source is clean.** `run` refuses a public working tree with uncommitted or untracked changes, so evidence always names an exact commit and tree.
-5. **Target prerequisites first.** `T.*` checks (signing keys, Auth settings, Management API and SQL probe channel, installed schema and grant assertion, exposed schemas, the example consumer's policies) run before anything else; a procedure whose prerequisites did not pass is `blocked`.
+5. **Target prerequisites first.** `T.*` checks (signing keys, Auth settings, Management API and SQL probe channel, installed schema and grant assertion, exposed schemas, the example consumer's policies, the L26 orders fixture) run before anything else; a procedure whose prerequisites did not pass is `blocked`.
 
 ## Inputs
 
-**Descriptor** (private JSON, no secrets; schema documented at the top of [`lib/target.js`](lib/target.js)): project ref and URL, the authorization record, a template for disposable addresses (`<local>+{tag}@<authorized domain>`; users are created confirmed through the admin API, so no mail is sent to them), SMTP recipients and the authorized sending domain, the Google test identity, the loopback callback port, and optional limits.
+**Descriptor** (private JSON, no secrets; schema documented at the top of [`lib/target.js`](lib/target.js)): project ref and URL, the authorization record, a template for disposable addresses (`<local>+{tag}@<authorized domain>`; users are created confirmed through the admin API, and links are generated by the admin API, so no mail is sent to them), SMTP recipients and the authorized sending domain, the Google test identity, the loopback callback port, optional limits, and `doctor.configFile`: the absolute path of a consumer config for `doctor --config` that names this project. The config is required for complete D1 catalog proof, because only with it does `doctor` check the redirect allow-list and the client registration; without a valid one, `L33.catalog_ok`, `L33.catalog_detects_widening` and `L33.widening_reverted` are `blocked` (`missing_doctor_config`), while the secret-key-only `incomplete` case and the separate `--probe` mode still run.
 
-**Credentials** come from the environment or from `--env-path`, an owner-only (`0600`) file outside every Git working tree: `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, and `SUPABASE_ACCESS_TOKEN` (Management API; without it every catalog, SQL-impersonation and row-count case is `blocked`). No other variable is read.
+**Credentials** come from the environment or from `--env-path`, an owner-only (`0600`), singly linked regular file (not a symlink) whose resolved directory is outside every Git working tree: `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`, and `SUPABASE_ACCESS_TOKEN` (Management API; without it every catalog, SQL-impersonation and row-count case is `blocked`). No other variable is read.
+
+**The Management API token** is a Supabase personal access token. A classic token carries the account's full access: every permission on every organization and project the account belongs to, now and later. A scoped token carries only the organizations, projects and permissions chosen when it is created ([Supabase: personal access tokens](https://supabase.com/docs/guides/platform/personal-access-tokens)). Use a scoped token limited to the isolated verification project, with only what the harness and `doctor` use: Database read-write (SQL through the query endpoint, including the reverted catalog changes and the harness's own rows), Data API Config read (exposed schemas) and Auth Config read (Auth settings and the redirect allow-list). The harness only ever addresses the project named in the descriptor, but that does not narrow a classic token. Showing that a token really is scoped, by an out-of-scope request being denied, needs a second disposable project the owner authorizes for that purpose; never probe a production or consumer project to find out.
 
 **The operator prepares the target** before a run; the harness only checks it:
 
-- apply `supabase/migrations/*.sql` (for example `auth-kit migrate`) and `examples/rls-consumer/policies.sql`;
+- apply `supabase/migrations/*.sql` (for example `auth-kit migrate`), `examples/rls-consumer/policies.sql` and the L26 fixture [`fixtures/orders-consumer/policies.sql`](fixtures/orders-consumer/policies.sql) (table `app.orders`, whose policy names the fixed client `orders-demo`; the harness registers that client and applies [`fixtures/orders-consumer/auth-model.json`](fixtures/orders-consumer/auth-model.json));
 - expose `auth_kit` and `app` and never `auth_kit_private`;
 - enable TOTP enrolment and verification, require e-mail confirmation, and set the access-token lifetime (L25 waits one full lifetime);
+- write the consumer config named by `doctor.configFile` (for example for `rls-demo`, which the run registers with open signup) and put its exact `callback`, `verify` and `reset` URLs in the redirect allow-list;
 - for the provider cases: custom SMTP on the authorized sending domain, the Google provider, and the exact redirect `http://localhost:<callbackPort>/hosted/callback`;
-- consider raising the sign-in rate limit of the isolated project: a full run creates about 45 disposable users and makes about 50 password sign-ins; the harness paces sign-ins to the descriptor's `signInsPerFiveMinutes` (default 25) and treats an exhausted 429 budget as `blocked`.
+- for the browser suite, on the machine that runs it: the Chromium build `playwright-core` expects (without it the `PW.*` cases are `blocked`, `missing_chromium`);
+- consider raising the sign-in rate limit of the isolated project: a full run creates about 55 disposable users and makes about 70 password sign-ins, about 15 of them in the browser (the local rehearsal without the browser suite: 45 and 55); the harness paces all of them, the browser's included, to the descriptor's `signInsPerFiveMinutes` (default 25) and treats an exhausted 429 budget as `blocked`.
 
 ## Commands
 
@@ -65,12 +69,12 @@ node tests/hosted/run.js verify-evidence --evidence-dir <dir>
 
 ## Evidence
 
-A fresh, owner-only directory that must lie outside the public working tree or in a path the repository ignores:
+A fresh, owner-only directory that must resolve (symlinks followed; a dangling link on the way is refused) to a place outside the public working tree or to a path the repository ignores; it is created only at that resolved place:
 
 | File | Content |
 | --- | --- |
 | `run.json` | source commit, tree and cleanliness; Node version; target ref and URL; authorization record id; authorized classes; capabilities; selection; migration file hashes |
-| `calls.jsonl` | every outbound request: method, origin, sanitised path, status, duration |
+| `calls.jsonl` | every outbound request: method, origin, sanitised path, status, duration; the browser's requests marked `via: browser` (a loopback page address is logged without its query, which can carry a link token) |
 | `observations.jsonl` | what each procedure observed; every assertion points at a line here |
 | `cases.jsonl` | one normalised record per case |
 | `summary.json` | verdict, counts, per-case status and reason, residue |
@@ -81,15 +85,15 @@ Every written value is sanitised ([`lib/redact.js`](lib/redact.js)): credentials
 
 ## Residue and cleanup
 
-Every run uses a fresh run id: client ids are `hv<run>-<letter>` and disposable addresses carry `hv<run>-<alias>`, so runs never share kit state except the fixed client `rls-demo` that the example policies name. Before anything is created, an intent line is written and flushed to `state/ledger.jsonl` (kinds, aliases, ids and fixed statement names only; no address, password or token). Cleanup runs last in every run and can be rerun from the ledger after a crash (`run.js cleanup --from`): it deletes the ledger's users (a user whose create answer was lost is found again by its regenerated address), revokes widened grants, drops fault triggers, deletes this run's notes with `cleanup_sql`, and counts what remains. Kit rows of the run's clients (clients, memberships, enrollments, events, request log) cannot be removed through any kit function, because enrollments and events are append-only by design; they are counted and reported as residue. Deleting a whole disposable project is the complete cleanup.
+Every run uses a fresh run id: client ids are `hv<run>-<letter>` and disposable addresses carry `hv<run>-<alias>`, so runs never share kit state except the fixed clients `rls-demo` and `orders-demo` that installed policies name. Before anything is created, an intent line is written and flushed to `state/ledger.jsonl` (kinds, aliases, ids and fixed statement names only; no address, password or token). Cleanup runs last in every run and can be rerun from the ledger after a crash (`run.js cleanup --from`): it deletes the ledger's users (a user whose create answer was lost is found again by its regenerated address), revokes widened grants, drops fault triggers, and settles the run's consumer rows ([`lib/rows.js`](lib/rows.js)). Every note and order title starts with the run marker `hv<run> `, so a row whose insert committed but whose answer was lost is still found: cleanup looks the run's rows up by that marker, deletes them only with `cleanup_sql`, and counts again. A ledger entry is marked removed only on a counted zero; otherwise it stays outstanding as residue (`cleanup_sql_not_authorized`, `rows_remain`), and an unreadable count is `unverified` and fails `C.rows_reported` rather than reading as zero. Kit rows of the run's clients (clients, memberships, enrollments, events, request log) cannot be removed through any kit function, because enrollments and events are append-only by design; they are counted and reported as residue. Deleting a whole disposable project is the complete cleanup.
 
 ## Design-time failure analysis
 
-- **Retries.** No write is retried blindly. Kit writes carry request ids, and every L30 retry is itself an assertion. A lost answer to a user creation is resolved by the ledger and the address sweep, never by creating again. Sign-ins and reads are the only calls retried, on 429 only, with a bounded wait; exhaustion is `blocked`.
+- **Retries.** No write is retried blindly. Kit writes carry request ids, and every L30 retry is itself an assertion. A lost answer to a user creation is resolved by the ledger and the address sweep, and a lost answer to a row insert by the run marker, never by creating again. Sign-ins and reads are the only calls retried, on 429 only, with a bounded wait; exhaustion is `blocked`.
 - **Partial failure.** Each case runs in isolation: an exception blocks or fails that case alone (or, during a procedure's shared setup, that procedure's unreported cases) with a fixed reason and the sanitised error in the evidence. Catalog mutations are reverted in `finally` blocks and again by cleanup from the ledger.
 - **Stale tokens and clocks.** Sessions are obtained inside the procedure that uses them; a session shared by several cases is renewed when it is within two minutes of its `exp`. Reuse is deliberate only where it is the subject (L25, and the S1-to-S2 model change read with the same tokens). L25 waits for the server-issued `exp` plus a margin and records the clock offset seen at sign-in; TOTP codes are never reused within one time step.
 - **Concurrency.** Cases run sequentially except the deliberate concurrent ones (L27 joins, L29 applies, L35 claims). L35(d) starts the second runner only after the first runner's claim is committed, so the outcome is determined rather than timing-dependent. Two harness runs against one project do not share clients or users; they share only `rls-demo`, whose assertions count only the run's own rows.
-- **Hostile but valid states.** Earlier runs' residue is excluded by run-scoped ids; an unreadable or group-readable env file, an env file inside a Git working tree, an existing evidence directory and an expired authorization refuse the run; an unexpected answer from Auth, PostgREST or the Management API fails or blocks the case with a fixed reason. None is treated as success.
+- **Hostile but valid states.** Earlier runs' residue is excluded by run-scoped ids and title markers; an unreadable or group-readable env file, an env file that is a symlink or hard link or resolves into a Git working tree, an evidence directory that exists or resolves into the tracked public tree, and an expired authorization refuse the run; an unexpected answer from Auth, PostgREST or the Management API fails or blocks the case with a fixed reason. None is treated as success.
 - **Secret leakage.** Two layers (sanitise on write, scan every finished file) plus the network gate's origin allow-list, which also fences the library under test.
 
 ## Self-tests and rehearsal (not hosted evidence)
@@ -97,14 +101,15 @@ Every run uses a fresh run id: client ids are `hv<run>-<letter>` and disposable 
 ```bash
 node --test tests/hosted/selftest/*.test.js
 DWARPAL_PG_BIN=<postgres bin> node tests/sql/run.js tests/hosted/selftest/sql/probes.test.js tests/hosted/selftest/sql/rehearsal.test.js
+node --test tests/hosted/selftest/browser/rehearsal.playwright.test.js
 ```
 
-The first suite needs no database and no network. The second runs on the throwaway PostgreSQL of `tests/sql`: `probes.test.js` executes the harness's own catalog and impersonation SQL against the real migration (every function and role against the design grant table, rollback of everything a probe did, refusal codes), and `rehearsal.test.js` runs every procedure, in order, against the server tests' synthetic Supabase stand-in bridged to that database, with hosted provenance off. The rehearsal requires every rehearsable case to reach its expected outcome while recording all of them `not_run` (`not_hosted`), and a sensitivity rehearsal shows that a widened grant and an Auth that forgets signed-out sessions fail the cases that must catch them. PostgREST, GoTrue, the Management API envelope, provider behavior and hosted timing are not part of either.
+The first suite needs no database and no network. The second runs on the throwaway PostgreSQL of `tests/sql`: `probes.test.js` executes the harness's own catalog and impersonation SQL against the real migration (every function and role against the design grant table, rollback of everything a probe did, refusal codes), and `rehearsal.test.js` runs every procedure, in order, against the server tests' synthetic Supabase stand-in bridged to that database, with hosted provenance off. The rehearsal requires every rehearsable case to reach its expected outcome while recording all of them `not_run` (`not_hosted`), and a sensitivity rehearsal shows that a widened grant and an Auth that forgets signed-out sessions fail the cases that must catch them. The browser rehearsal runs the Playwright flows in Chromium against the repository's development Auth emulator (`packages/emulator`); it checks the flows' own logic and records nothing that could pass a hosted case. The SQL rehearsal leaves the `PW.*` cases blocked, because they need a browser against Auth. PostgREST, GoTrue, the Management API envelope, provider behavior and hosted timing are not part of any of them.
 
 ## Known limitations
 
 - The first hosted run is also the first contact with the real Management API error envelope; the SQL probe channel is checked first (`T.management`) and blocks the dependent cases if the envelope differs.
 - The harness runs the kit from this source tree, not from a packed tarball.
-- `L32.email_two_matches` cannot normally be created on a hosted project (Auth keeps addresses unique); it is attempted and, when refused, recorded `not_run` with that reason.
-- `doctor` redirect and registration checks run only when the descriptor names a consumer config (`doctor.configFile`).
-- Browser-kit screens are not driven against the hosted project; the Google and SMTP cases use the Auth API with a human in the loop.
+- Two confirmed users with one address is not a valid hosted Supabase state (Auth keeps addresses unique), so `bootstrap-manager`'s `ambiguous_user` refusal is covered only by the unit and CLI tests with an injected duplicate listing (`tests/cli/cli.test.js`, `tests/server/operator.test.js`). It is neither attempted nor counted here, and that evidence is not hosted proof.
+- The browser suite drives sign-in, enrollment outcomes, MFA, links, recovery and sign-out. Browser sign-up (which sends a real confirmation) and Google (which needs a human) are not in it: real SMTP delivery and one interactive Google sign-in are their own cases, through the Auth API with a human in the loop.
+- The L26 Node guard reads orders from an in-memory copy of the two fixture rows; the consumer's own store is not the subject of L26.

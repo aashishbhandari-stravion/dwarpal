@@ -10,10 +10,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CASES, ACTORS, inventoryProblems } from '../lib/inventory.js';
+import { CASES, ACTORS, EARLIER_LANE_EVIDENCE, inventoryProblems } from '../lib/inventory.js';
 import { PROCEDURES } from '../lib/procedures.js';
 import { normaliseRecord, summarise, Blocked } from '../lib/status.js';
-import { descriptorProblems, authorize, readCredentials, TargetError, MANAGEMENT_ORIGIN } from '../lib/target.js';
+import { descriptorProblems, authorize, readCredentials, readDoctorConfig, TargetError, MANAGEMENT_ORIGIN } from '../lib/target.js';
 import { Redactor } from '../lib/redact.js';
 import { Evidence, EvidenceError, sha256File } from '../lib/evidence.js';
 import { Ledger } from '../lib/ledger.js';
@@ -23,8 +23,14 @@ import { runProcedures } from '../lib/runner.js';
 import { parseProbe, nullCall, probeStatement } from '../lib/sqlprobe.js';
 import { executionFindings } from '../cases/routing.js';
 import { parseConfirmationLink, smtpAddress } from '../cases/providers.js';
-import { main, selectionFor, EXIT } from '../run.js';
-import { PUBLIC_ROOT } from '../lib/paths.js';
+import { insertNote } from '../cases/policy.js';
+import { ordersGuard } from '../cases/orders.js';
+import { createPrincipal } from '../../../packages/core/index.js';
+import { procedures as cleanupProcedures } from '../cases/cleanup.js';
+import { rowSql, rowTitle, settleRows } from '../lib/rows.js';
+import { main, selectionFor, plan, EXIT } from '../run.js';
+import { PUBLIC_ROOT, credentialFileProblem, evidenceLocationProblem } from '../lib/paths.js';
+import { spawnSync } from 'node:child_process';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const REF = 'abcdefghijklmnopqrst';
@@ -86,11 +92,16 @@ test('every actor alias the procedures create is declared in the inventory', () 
 });
 
 test('the L25, L27-L35, routing, doctor and provider requirements each have cases', () => {
-  for (const prefix of ['L25.', 'L27.', 'L28.http.', 'L28.sql.', 'L28.policy.', 'L29.', 'L30.', 'L31.', 'L32.', 'L33.', 'L34.', 'L35.', 'M.S0.', 'M.S1.', 'M.S2.', 'P.smtp.', 'P.google.', 'P.totp.', 'C.']) {
+  for (const prefix of ['L25.', 'L26.aal1.', 'L26.aal2.', 'PW.', 'L27.', 'L28.http.', 'L28.sql.', 'L28.policy.', 'L29.', 'L30.', 'L31.', 'L32.', 'L33.', 'L34.', 'L35.', 'M.S0.', 'M.S1.', 'M.S2.', 'P.smtp.', 'P.google.', 'P.totp.', 'C.']) {
     assert.ok(CASES.some((c) => c.id.startsWith(prefix)), prefix);
   }
   assert.deepEqual(CASES.filter((c) => c.lld === 'L35').map((c) => c.id), ['L35.a', 'L35.b', 'L35.c', 'L35.d']);
-  assert.deepEqual(CASES.filter((c) => !c.required).map((c) => c.id), ['L32.email_two_matches']);
+  // The owner's L32 disposition: no hosted duplicate-user case; ambiguous_user is unit/CLI evidence only.
+  assert.deepEqual(CASES.filter((c) => !c.required).map((c) => c.id), []);
+  assert.equal(CASES.some((c) => c.id === 'L32.email_two_matches'), false);
+  assert.deepEqual(CASES.filter((c) => c.lld === 'L32').map((c) => c.id).sort(),
+    ['L32.email_unique_match', 'L32.email_zero_matches', 'L32.lookup_incomplete', 'L32.user_id_confirmed', 'L32.user_id_unconfirmed']);
+  assert.ok(EARLIER_LANE_EVIDENCE.some((e) => e.lld === 'L32' && e.cases.includes('ambiguous_user') && /not hosted proof/.test(e.rerun)));
 });
 
 // Statuses ----------------------------------------------------------------------
@@ -170,6 +181,105 @@ test('an env file must be owner-only and outside every Git working tree', () => 
   }
 });
 
+/** A disposable Git working tree (tracked/ and an ignored ignored/) plus a directory outside it. */
+function linkWorld() {
+  const base = fs.realpathSync(tmp());
+  const repo = path.join(base, 'repo');
+  const outside = path.join(base, 'outside');
+  for (const d of [repo, path.join(repo, 'tracked'), path.join(repo, 'ignored'), outside]) fs.mkdirSync(d);
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'ignored/\n');
+  return { base, repo, outside };
+}
+
+test('credential files are judged where they resolve: symlinks, symlinked directories and hard links are refused (L06-4)', () => {
+  const { repo, outside } = linkWorld();
+  const inTree = path.join(repo, 'tracked', 'hosted.env');
+  fs.writeFileSync(inTree, 'SUPABASE_SECRET_KEY=sb_secret_intree\n', { mode: 0o600 });
+  assert.equal(credentialFileProblem(inTree), 'inside_git_tree');
+  // An owner-only symlink outside the tree pointing at the tracked file.
+  const link = path.join(outside, 'hosted.env');
+  fs.symlinkSync(inTree, link);
+  assert.equal(credentialFileProblem(link), 'symlink');
+  assert.throws(() => readCredentials({}, link), (e) => e instanceof TargetError && e.problems.includes('env_file_symlink'));
+  // A real file reached through a symlinked directory that resolves into the tree.
+  const dirLink = path.join(outside, 'dir');
+  fs.symlinkSync(path.join(repo, 'tracked'), dirLink);
+  assert.equal(credentialFileProblem(path.join(dirLink, 'hosted.env')), 'inside_git_tree');
+  assert.throws(() => readCredentials({}, path.join(dirLink, 'hosted.env')), (e) => e.problems.includes('env_file_inside_git_tree'));
+  // A hard link outside the tree to the tracked file.
+  const hard = path.join(outside, 'hard.env');
+  fs.linkSync(inTree, hard);
+  assert.equal(credentialFileProblem(hard), 'hard_linked');
+  assert.throws(() => readCredentials({}, hard), (e) => e.problems.includes('env_file_hard_linked'));
+  // A genuine owner-only file outside every tree still reads.
+  const good = path.join(outside, 'good.env');
+  fs.writeFileSync(good, 'SUPABASE_SECRET_KEY=sb_secret_good\n', { mode: 0o600 });
+  assert.equal(credentialFileProblem(good), null);
+  assert.deepEqual(readCredentials({}, good), { SUPABASE_SECRET_KEY: 'sb_secret_good' });
+});
+
+test('evidence is judged and created where it resolves: a link into the public tree is refused, the ignored part allowed (L06-4)', () => {
+  const { repo, outside } = linkWorld();
+  const tracked = path.join(repo, 'tracked');
+  assert.equal(evidenceLocationProblem(path.join(tracked, 'run'), repo), 'inside_public_tree');
+  // An external symlink to a tracked directory, as the directory or as an ancestor.
+  const evLink = path.join(outside, 'ev');
+  fs.symlinkSync(tracked, evLink);
+  assert.equal(evidenceLocationProblem(evLink, repo), 'inside_public_tree');
+  assert.equal(evidenceLocationProblem(path.join(evLink, 'run'), repo), 'inside_public_tree');
+  assert.throws(() => new Evidence(path.join(evLink, 'run'), new Redactor(), { root: repo }), (e) => e instanceof EvidenceError && e.reason === 'inside_public_tree');
+  assert.equal(fs.existsSync(path.join(tracked, 'run')), false);
+  // A dangling symlink on the way could be created anywhere later: refused.
+  const dangling = path.join(outside, 'dangling');
+  fs.symlinkSync(path.join(tracked, 'later'), dangling);
+  assert.equal(evidenceLocationProblem(path.join(dangling, 'run'), repo), 'dangling_symlink');
+  assert.throws(() => new Evidence(path.join(dangling, 'run'), new Redactor(), { root: repo }), (e) => e.reason === 'dangling_symlink');
+  assert.equal(fs.existsSync(path.join(tracked, 'later')), false);
+  // The public root named through a symlink is resolved too.
+  const rootLink = path.join(outside, 'root');
+  fs.symlinkSync(repo, rootLink);
+  assert.equal(evidenceLocationProblem(path.join(tracked, 'run'), rootLink), 'inside_public_tree');
+  // A link into the ignored part is allowed; the evidence lands at the resolved place.
+  const ignLink = path.join(outside, 'ign');
+  fs.symlinkSync(path.join(repo, 'ignored'), ignLink);
+  assert.equal(evidenceLocationProblem(path.join(ignLink, 'run'), repo), null);
+  const ev = new Evidence(path.join(ignLink, 'run'), new Redactor(), { root: repo });
+  assert.equal(ev.dir, path.join(repo, 'ignored', 'run'));
+  ev.observe('p', 'x', { ok: true });
+  const status = spawnSync('git', ['-C', repo, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
+  assert.equal(status.stdout.split('\n').filter((l) => l.includes('run')).length, 0);
+});
+
+test('complete D1 catalog proof needs a valid consumer config for this project; without it those cases are blocked (L06-3)', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'consumer.json');
+  const config = {
+    clientId: 'rls-demo', supabaseUrl: URL_, publishableKey: 'sb_publishable_configkey', origin: 'https://consumer.example.test',
+    routes: { prefix: '/account' }, allowedReturnPaths: ['/app'], defaultReturnPath: '/app', providers: { email: true, google: false }, selfSignup: true,
+  };
+  const withConfig = (f) => descriptor({ doctor: { configFile: f } });
+  assert.deepEqual(descriptorProblems(descriptor({ doctor: { configFile: 'relative.json' } })), ['doctor_config_file']);
+  assert.deepEqual(readDoctorConfig(descriptor()), { problem: 'doctor_config_missing' });
+  assert.deepEqual(readDoctorConfig(withConfig(file)), { problem: 'doctor_config_unreadable' });
+  fs.writeFileSync(file, JSON.stringify({ ...config, routes: { prefix: 'no-slash' } }));
+  assert.deepEqual(readDoctorConfig(withConfig(file)), { problem: 'doctor_config_invalid' });
+  fs.writeFileSync(file, JSON.stringify({ ...config, supabaseUrl: 'https://zyxwvutsrqponmlkjihg.supabase.co' }));
+  assert.deepEqual(readDoctorConfig(withConfig(file)), { problem: 'doctor_config_other_project' });
+  fs.writeFileSync(file, JSON.stringify(config));
+  assert.equal(readDoctorConfig(withConfig(file)).config.clientId, 'rls-demo');
+
+  const creds = { ...CREDS, SUPABASE_ACCESS_TOKEN: 'sbp_0123456789abcdef0123' };
+  const actions = new Set(['connect', 'create_users', 'mutations', 'catalog_mutation']);
+  const gates = (d) => Object.fromEntries(plan({ descriptor: d, creds, interactive: false, actions })
+    .filter((c) => c.id.startsWith('L33.')).map((c) => [c.id, c.gate === 'ready' ? 'ready' : c.missing.join('+')]));
+  assert.deepEqual(gates(descriptor()), {
+    'L33.secret_only_incomplete': 'ready', 'L33.catalog_ok': 'doctor_config', 'L33.probe_mode': 'ready',
+    'L33.catalog_detects_widening': 'doctor_config', 'L33.probe_detects_widening': 'ready', 'L33.widening_reverted': 'doctor_config',
+  });
+  assert.ok(Object.values(gates(withConfig(file))).every((g) => g === 'ready'));
+});
+
 // Redaction and evidence ---------------------------------------------------------
 
 test('sanitation removes secrets, tokens, keys, addresses and hashes; aliases stay stable', () => {
@@ -240,6 +350,153 @@ test('the network gate is closed by default and admits only authorized origins',
   await assert.rejects(gate.fetch(`${URL_}/auth/v1/user`), (e) => e.reason === 'closed');
   assert.deepEqual(seen.map((c) => [c.origin, c.path, c.status]), [[URL_, '/auth/v1/user?x=1', 200], ['loopback', '/x', 200]]);
   assert.equal(inner.calls.length, 0);
+});
+
+// L26 order guard -----------------------------------------------------------------
+
+const ORDER_ROLES = {
+  customer: { flags: { selfAssignable: true, managesMembers: false, mfaRequired: false }, permissions: ['orders:read:own'], grantedVia: 'join' },
+  staff: { flags: { selfAssignable: false, managesMembers: false, mfaRequired: true }, permissions: ['orders:read:any'], grantedVia: 'manager' },
+};
+
+function orderPrincipal(userId, roles, aal) {
+  const at = '2026-01-01T00:00:00.000Z';
+  return createPrincipal({
+    clientId: 'orders-demo',
+    identity: { userId, verifiedEmail: 'someone@example.test', providers: ['email'] },
+    session: { id: `s-${aal}`, aal, issuedAt: at, expiresAt: '2026-01-01T00:30:00.000Z', checkedAt: at },
+    enrolledAt: at,
+    memberships: roles.map((roleKey) => ({ clientId: 'orders-demo', roleKey, grantedAt: at, ...ORDER_ROLES[roleKey] })),
+  });
+}
+
+test('the L26 Node guard is the literal S4 sequence: own order by ownership, any order only through an active role', async () => {
+  const me = '00000000-0000-4000-8000-00000000000a';
+  const other = '00000000-0000-4000-8000-00000000000b';
+  const guard = ordersGuard(new Map([['1', { id: '1', userId: other }], ['2', { id: '2', userId: me }]]));
+  const get = (principal, path) => guard(principal, new URL(path, 'http://localhost'));
+  const aal1 = orderPrincipal(me, ['customer', 'staff'], 'aal1');
+  assert.deepEqual(await get(aal1, '/orders/1'), { status: 403, body: { error: 'forbidden', withheld: ['staff'] } });
+  assert.deepEqual(await get(aal1, '/orders/2'), { status: 200, body: { id: '2' } });
+  const aal2 = orderPrincipal(me, ['customer', 'staff'], 'aal2');
+  assert.deepEqual([(await get(aal2, '/orders/1')).status, (await get(aal2, '/orders/2')).status], [200, 200]);
+  // A customer holding only the own key reaches their own order: no unscoped key is checked first (R3).
+  const customer = orderPrincipal(me, ['customer'], 'aal1');
+  assert.deepEqual(await get(customer, '/orders/2'), { status: 200, body: { id: '2' } });
+  assert.deepEqual(await get(customer, '/orders/1'), { status: 403, body: { error: 'forbidden', withheld: [] } });
+  // Staff alone at aal1: no role grants the own key, and the broad one is withheld (named for the MFA offer).
+  assert.deepEqual(await get(orderPrincipal(me, ['staff'], 'aal1'), '/orders/2'), { status: 403, body: { error: 'forbidden', withheld: ['staff'] } });
+  assert.equal((await get(aal2, '/orders/9')).status, 404);
+  await assert.rejects(get(null, '/orders/2'), (e) => e.code === 'no_token');
+});
+
+// Consumer-row residue (L06-8) -----------------------------------------------------
+
+/** A target whose app.notes commits inserts; the reply to the first can be lost. Answers only cleanup's exact statements. */
+function rowsTarget({ loseFirstReply = true, readFails = false } = {}) {
+  const table = [];
+  let next = 1;
+  let lost = !loseFirstReply;
+  const own = (runId) => table.filter((r) => r.title.startsWith(`hv${runId} `));
+  const statements = [];
+  const hosted = {
+    rest: {
+      async insert(_token, schema, name, row) {
+        assert.deepEqual([schema, name], ['app', 'notes']);
+        table.push({ id: next, title: row.title });
+        next += 1;
+        if (!lost) {
+          lost = true;
+          return { kind: 'failure', status: 0 };
+        }
+        return { kind: 'value', status: 201, value: [{ id: next - 1 }] };
+      },
+    },
+    management: {
+      async read(sql) {
+        statements.push(sql);
+        if (readFails) throw new Error('management unavailable');
+        for (const runId of ['r1', 'r2']) {
+          if (sql === rowSql.ids('notes', runId)) return own(runId).map((r) => r.id);
+          if (sql === rowSql.count('notes', runId)) return String(own(runId).length);
+        }
+        if (sql.includes("'clients'")) return { clients: 0 };
+        if (sql === rowSql.ids('orders', 'r1') || sql === rowSql.count('orders', 'r1')) throw new Error('no order intents: never asked');
+        return '0';
+      },
+      async exec(sql) {
+        statements.push(sql);
+        for (const runId of ['r1', 'r2']) {
+          if (sql === rowSql.remove('notes', runId)) {
+            for (const r of own(runId)) table.splice(table.indexOf(r), 1);
+            return;
+          }
+        }
+        throw new Error(`unexpected statement ${sql}`);
+      },
+    },
+  };
+  return { table, hosted, statements };
+}
+
+function rowsCtx(dir, hosted, actions, runId = 'r1') {
+  return { hosted, runId, actions: new Set(actions), ledger: new Ledger(path.join(dir, 'ledger.jsonl')), observe: () => {} };
+}
+
+test('a note whose insert answer was lost is found by its run marker, never reported as zero (L06-8)', async () => {
+  const dir = tmp();
+  const target = rowsTarget();
+  const ctx = rowsCtx(dir, target.hosted, ['connect']);
+  await assert.rejects(insertNote(ctx, 'rls_member', 'token'), (e) => e.stage === 'insert_note');
+  assert.equal(await insertNote(ctx, 'rls_staff', 'token'), 2);
+  target.table.push({ id: 99, title: rowTitle('r2', 'rls_member') }); // another run's note
+  assert.deepEqual(ctx.ledger.outstanding().map((e) => [e.key, e.op, e.rowId ?? null]), [['rls_member', 'intent', null], ['rls_staff', 'created', 2]]);
+
+  // Without cleanup_sql: both notes counted as residue, nothing marked removed.
+  const noSql = await settleRows(ctx, 'notes');
+  assert.deepEqual(noSql, { kind: 'notes', intents: 2, knownIds: 1, foundByMarker: 2, recoveredByMarker: 1, deleted: false, remaining: 2, reason: 'cleanup_sql_not_authorized' });
+  assert.deepEqual(ctx.ledger.outstanding().map((e) => [e.key, e.op]), [['rls_member', 'residue'], ['rls_staff', 'residue']]);
+
+  // An unreadable target: unknown, not zero; still outstanding.
+  const blind = rowsCtx(dir, rowsTarget({ readFails: true }).hosted, ['connect', 'cleanup_sql']);
+  assert.deepEqual((({ remaining, reason }) => ({ remaining, reason }))(await settleRows(blind, 'notes')), { remaining: null, reason: 'unverified' });
+  assert.equal(blind.ledger.outstanding().length, 2);
+
+  // A cleanup rerun from a copy of the ledger with cleanup_sql: both deleted by marker, the other run's note kept.
+  const rerunDir = tmp();
+  fs.copyFileSync(path.join(dir, 'ledger.jsonl'), path.join(rerunDir, 'ledger.jsonl'));
+  const rerun = rowsCtx(rerunDir, target.hosted, ['connect', 'cleanup_sql']);
+  const settled = await settleRows(rerun, 'notes');
+  assert.deepEqual((({ foundByMarker, recoveredByMarker, deleted, remaining }) => ({ foundByMarker, recoveredByMarker, deleted, remaining }))(settled),
+    { foundByMarker: 2, recoveredByMarker: 1, deleted: true, remaining: 0 });
+  assert.deepEqual(target.table, [{ id: 99, title: rowTitle('r2', 'rls_member') }]);
+  assert.deepEqual(rerun.ledger.outstanding(), []);
+  // Nothing left to settle on a second rerun, and no query is needed for it.
+  const before = target.statements.length;
+  assert.equal((await settleRows(rerun, 'notes')).remaining, 0);
+  assert.equal(target.statements.length, before);
+});
+
+test('C.rows_reported fails on an unknown row count and passes only on a counted zero (L06-8)', async () => {
+  const run = async (hosted, actions, ledgerLines) => {
+    const dir = tmp();
+    const ctx = rowsCtx(dir, hosted, actions);
+    for (const [op, key, data] of ledgerLines) ctx.ledger.write(op, 'notes', key, data);
+    const cases = CASES.filter((c) => c.procedure === 'cleanup');
+    const { records } = await runProcedures({
+      procedures: cleanupProcedures, ctx: { ...ctx, ids: {}, descriptor: {}, state: {} }, selection: null,
+      capabilities: { publishable_key: true, secret_key: true, management_token: true }, actions: ctx.actions, hosted: false,
+      evidence: new Evidence(path.join(dir, 'ev'), new Redactor()), cases,
+    });
+    return { status: records.get('C.rows_reported').rehearsal?.status, reason: records.get('C.rows_reported').rehearsal?.reason, outer: records.get('C.rows_reported').status };
+  };
+  const lost = [['intent', 'rls_member', {}]];
+  const blind = rowsTarget({ readFails: true });
+  assert.deepEqual(await run(blind.hosted, ['connect', 'create_users', 'cleanup_sql'], lost), { status: 'failed', reason: 'assertion_failed', outer: 'not_run' });
+  const target = rowsTarget();
+  target.table.push({ id: 5, title: rowTitle('r1', 'rls_member') });
+  assert.deepEqual(await run(target.hosted, ['connect', 'create_users', 'cleanup_sql'], lost), { status: 'passed', reason: null, outer: 'not_run' });
+  assert.deepEqual(target.table, []);
 });
 
 // Pure helpers ---------------------------------------------------------------------

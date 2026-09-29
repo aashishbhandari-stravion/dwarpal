@@ -26,24 +26,40 @@ import { clientIds } from '../../lib/fixtures.js';
 import { createPrompter } from '../../lib/interactive.js';
 import { PUBLIC_ROOT } from '../../lib/paths.js';
 
-// Cases the rehearsal cannot reach: real providers need a human and real mail
-// or Google; the duplicate-address case is refused by Auth (and by the fixture).
+// Cases this rehearsal cannot reach: real providers need a human and real
+// mail or Google; the browser suite needs a browser against Auth and is
+// rehearsed separately against the development emulator
+// (selftest/browser/rehearsal.playwright.test.js).
 const UNREHEARSABLE = new Map([
   ['P.smtp.confirmation_delivered', 'blocked'],
   ['P.smtp.custom_sender', 'blocked'],
   ['P.google.sign_in', 'blocked'],
-  ['L32.email_two_matches', 'not_run'],
+  ...CASES.filter((c) => c.procedure === 'browser').map((c) => [c.id, 'blocked']),
 ]);
 
-// Findings the rehearsal reproduces on the real migration (see README, open questions).
-const KNOWN_FINDINGS = new Map([
-  ['L29.live.no_manager_refused', 'refusal names the holder'],
-]);
+// Findings the rehearsal reproduces on the real migration (none open).
+const KNOWN_FINDINGS = new Map();
+
+// The consumer config doctor --config reads (L33 complete catalog proof): the
+// fixed rls-demo client, which the policy procedure registers before doctor runs.
+const DOCTOR_ORIGIN = 'https://consumer.example.test';
+function doctorConfig(url) {
+  return {
+    clientId: 'rls-demo', supabaseUrl: url, publishableKey: 'sb_publishable_rehearsalconfig', origin: DOCTOR_ORIGIN,
+    routes: { prefix: '/account' }, allowedReturnPaths: ['/app'], defaultReturnPath: '/app', providers: { email: true, google: false }, selfSignup: true,
+  };
+}
 
 async function rehearse(db, { selection = null, mutate = async () => {} } = {}) {
-  const policiesSql = fs.readFileSync(path.join(PUBLIC_ROOT, 'examples', 'rls-consumer', 'policies.sql'), 'utf8');
-  const r = await createRehearsal(db, { policiesSql });
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dwh-rehearsal-')), 'evidence');
+  const read = (...parts) => fs.readFileSync(path.join(PUBLIC_ROOT, ...parts), 'utf8');
+  const policiesSql = read('examples', 'rls-consumer', 'policies.sql');
+  const ordersSql = read('tests', 'hosted', 'fixtures', 'orders-consumer', 'policies.sql');
+  const allowList = ['callback', 'verify', 'reset'].map((r) => `${DOCTOR_ORIGIN}/account/${r}`);
+  const r = await createRehearsal(db, { policiesSql, extraSql: [ordersSql], allowList });
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dwh-rehearsal-'));
+  const dir = path.join(base, 'evidence');
+  const configFile = path.join(base, 'doctor-config.json');
+  fs.writeFileSync(configFile, JSON.stringify(doctorConfig(r.target.url)));
   try {
     await mutate(r, db);
     const redactor = new Redactor();
@@ -57,8 +73,8 @@ async function rehearse(db, { selection = null, mutate = async () => {} } = {}) 
       managementOrigin: r.target.url, cliEnv: r.cliEnv,
     });
     const runId = newRunId();
-    const descriptor = { identities: { emailTemplate: 'rehearsal+{tag}@example.test' }, limits: { maxTokenLifetimeSeconds: 3600 }, callbackPort: 54329 };
-    const caps = { publishable_key: true, secret_key: true, management_token: true, smtp_recipient: false, google_identity: false, interactive: false };
+    const descriptor = { project: { url: r.target.url }, identities: { emailTemplate: 'rehearsal+{tag}@example.test' }, limits: { maxTokenLifetimeSeconds: 3600 }, callbackPort: 54329, doctor: { configFile } };
+    const caps = { publishable_key: true, secret_key: true, management_token: true, smtp_recipient: false, google_identity: false, interactive: false, doctor_config: true, chromium: false };
     const ctx = {
       hosted, ledger, redactor, gate, creds: r.creds, descriptor, runId, caps, actions, clock: r.clock,
       actors: new Actors({ hosted, ledger, redactor, template: descriptor.identities.emailTemplate, runId, actions, sleep: r.clock.sleep }),
@@ -107,6 +123,41 @@ test('every hosted procedure rehearses end to end and nothing passes without hos
       const text = fs.readFileSync(file, 'utf8');
       for (const secret of Object.values(creds).filter((v) => v.startsWith('sb'))) assert.ok(!text.includes(secret), `${file} holds a credential`);
     }
+  });
+});
+
+test('sensitivity: an orders policy without the ownership check and a missing redirect entry fail L26 and complete doctor proof', { timeout: 600_000 }, async () => {
+  await withDatabase(async (db) => {
+    const { records } = await rehearse(db, {
+      selection: new Set(['L26.aal1.node', 'L26.aal1.rls', 'L26.aal2.rls', 'L33.catalog_ok', 'L33.probe_mode']),
+      mutate: async (r) => {
+        const postgres = await db.connection('postgres');
+        await postgres.query("alter policy orders_select on app.orders using (auth_kit.has_permission('orders-demo', 'orders:read:own'))");
+        r.fake.authConfig.uri_allow_list = r.fake.authConfig.uri_allow_list.split(',').filter((e) => !e.endsWith('/reset')).join(',');
+      },
+    });
+    const status = (id) => `${records.get(id).rehearsal.status}`;
+    assert.equal(status('T.orders_consumer'), 'failed', 'the installed policy no longer names the ownership check');
+    assert.equal(status('L26.aal1.rls'), 'blocked', 'L26 does not run on a target whose fixture check failed');
+    assert.equal(status('L33.catalog_ok'), 'failed');
+    assert.ok(failingNames(records, 'L33.catalog_ok').includes('every catalog check, redirect allow-list and client registration included, ran and passed'));
+  });
+  await withDatabase(async (db) => {
+    // With the target check passing on a policy that looks right but leaks: the case itself must catch it.
+    const { records } = await rehearse(db, {
+      selection: new Set(['L26.aal1.node', 'L26.aal1.rls', 'L26.aal2.rls']),
+      mutate: async () => {
+        const postgres = await db.connection('postgres');
+        await postgres.query(`alter policy orders_select on app.orders using (auth_kit.has_permission('orders-demo', 'orders:read:any')
+          or (auth_kit.has_permission('orders-demo', 'orders:read:own') and (owner_id = auth.uid() or true)))`);
+      },
+    });
+    const status = (id) => `${records.get(id).rehearsal.status}`;
+    assert.equal(status('T.orders_consumer'), 'passed');
+    assert.equal(status('L26.aal1.node'), 'passed', 'the Node guard is unaffected');
+    assert.equal(status('L26.aal1.rls'), 'failed');
+    assert.ok(failingNames(records, 'L26.aal1.rls').includes('(i) another customer\'s order: zero rows'));
+    assert.equal(status('L26.aal2.rls'), 'passed');
   });
 });
 

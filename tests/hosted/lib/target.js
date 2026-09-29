@@ -23,13 +23,20 @@
 //     },
 //     "callbackPort": 54329,                                    // the allow-listed http://localhost:<port>/hosted/callback
 //     "limits": { "signInsPerFiveMinutes": 25, "maxTokenLifetimeSeconds": 3600 },
-//     "doctor": { "configFile": "<consumer config for doctor --config>" }        // optional: adds redirect and registration checks
+//     "doctor": { "configFile": "<absolute path of the consumer config for doctor --config>" }
 //   }
+//
+// The doctor config is required for complete D1 catalog proof (L33): without
+// a valid config for this project, doctor runs no redirect allow-list or
+// client-registration check, so the catalog-proof cases are blocked.
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { ACTION_CLASSES } from './inventory.js';
-import { credentialFileProblem } from './paths.js';
+import { validateClientConfig } from '../../../packages/core/index.js';
+import { chromiumAvailable } from './chromium.js';
+import { readCredentialFile } from './paths.js';
 
 export const SCHEMA = 'dwarpal-hosted-target/1';
 export const MANAGEMENT_ORIGIN = 'https://api.supabase.com';
@@ -81,7 +88,7 @@ export function descriptorProblems(d) {
   if (ids.emailTemplate !== undefined && (typeof ids.emailTemplate !== 'string' || !TEMPLATE.test(ids.emailTemplate))) p.push('email_template');
   if (ids.smtpRecipients !== undefined && (!Array.isArray(ids.smtpRecipients) || !ids.smtpRecipients.every((e) => typeof e === 'string' && (EMAIL.test(e) || TEMPLATE.test(e))))) p.push('smtp_recipients');
   if (ids.smtpSenderDomain !== undefined && (typeof ids.smtpSenderDomain !== 'string' || !DOMAIN.test(ids.smtpSenderDomain))) p.push('smtp_sender_domain');
-  if (d.doctor?.configFile !== undefined && typeof d.doctor.configFile !== 'string') p.push('doctor_config_file');
+  if (d.doctor?.configFile !== undefined && (typeof d.doctor.configFile !== 'string' || !path.isAbsolute(d.doctor.configFile))) p.push('doctor_config_file');
   if (d.limits !== undefined) {
     const { signInsPerFiveMinutes: s, maxTokenLifetimeSeconds: t } = d.limits ?? {};
     if (s !== undefined && !(Number.isInteger(s) && s >= 1 && s <= 1000)) p.push('limit_sign_ins');
@@ -100,12 +107,36 @@ export function readCredentials(env, envPath) {
   const out = {};
   for (const name of ENV_NAMES) if (typeof env[name] === 'string' && env[name] !== '') out[name] = env[name];
   if (envPath !== undefined) {
-    const problem = credentialFileProblem(envPath);
-    if (problem) throw new TargetError([`env_file_${problem}`]);
-    const parsed = parseEnv(fs.readFileSync(envPath, 'utf8'));
+    const read = readCredentialFile(envPath);
+    if (read.problem) throw new TargetError([`env_file_${read.problem}`]);
+    const parsed = parseEnv(read.text);
     for (const name of ENV_NAMES) if (!Object.hasOwn(out, name) && typeof parsed[name] === 'string' && parsed[name] !== '') out[name] = parsed[name];
   }
   return out;
+}
+
+/**
+ * The consumer config doctor --config reads: valid for core's
+ * validateClientConfig and naming this project's URL. Local only.
+ * @returns {{ file: string, config: object } | { problem: string }}
+ */
+export function readDoctorConfig(descriptor) {
+  const file = descriptor?.doctor?.configFile;
+  if (typeof file !== 'string' || !path.isAbsolute(file)) return { problem: 'doctor_config_missing' };
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return { problem: 'doctor_config_unreadable' };
+  }
+  let config;
+  try {
+    config = validateClientConfig(raw);
+  } catch {
+    return { problem: 'doctor_config_invalid' };
+  }
+  if (config.supabaseUrl !== descriptor.project?.url) return { problem: 'doctor_config_other_project' };
+  return { file, config };
 }
 
 function keyKind(value, prefix) {
@@ -121,7 +152,7 @@ function keyKind(value, prefix) {
 }
 
 /** Which inventory capabilities the inputs provide. */
-export function capabilities(descriptor, creds, { interactive = false } = {}) {
+export function capabilities(descriptor, creds, { interactive = false, chromium = chromiumAvailable() } = {}) {
   const pub = keyKind(creds.SUPABASE_PUBLISHABLE_KEY, 'sb_publishable_');
   const sec = keyKind(creds.SUPABASE_SECRET_KEY, 'sb_secret_');
   return {
@@ -130,7 +161,9 @@ export function capabilities(descriptor, creds, { interactive = false } = {}) {
     management_token: typeof creds.SUPABASE_ACCESS_TOKEN === 'string' && /^[A-Za-z0-9_.-]{8,4096}$/.test(creds.SUPABASE_ACCESS_TOKEN),
     smtp_recipient: Array.isArray(descriptor?.identities?.smtpRecipients) && descriptor.identities.smtpRecipients.length > 0,
     google_identity: typeof descriptor?.identities?.google?.email === 'string',
+    doctor_config: descriptor !== null && descriptor !== undefined && readDoctorConfig(descriptor).config !== undefined,
     interactive: interactive === true,
+    chromium: chromium === true,
   };
 }
 

@@ -1,18 +1,22 @@
 // Cleanup and residue, always attempted last (and by `run.js cleanup` after
 // a crashed run, from the same ledger). Users are deleted through the Auth
 // admin API; a user whose create answer was lost is found again by its
-// regenerated address. Widened grants and fault triggers are reverted. Notes
-// rows are deleted only with `cleanup_sql` authorization. Kit rows of the
-// run's clients cannot be deleted through any kit function (enrollments and
-// events are append-only by design); they are counted and reported.
+// regenerated address. Widened grants and fault triggers are reverted.
+// Consumer rows (notes, orders) are found by the run marker in their title,
+// including one whose insert answer was lost, deleted only with
+// `cleanup_sql`, and counted again; an unknown count fails the case rather
+// than reading as zero (lib/rows.js). Kit rows of the run's clients cannot
+// be deleted through any kit function (enrollments and events are
+// append-only by design); they are counted and reported.
 
 import { attempt, uuidLit } from '../lib/world.js';
 import { emailFor } from '../lib/actors.js';
 import { WIDENINGS, revertWidenings } from './doctor.js';
 import { faultSql } from './enrollment.js';
 import { smtpAddress } from './providers.js';
-import { clientIds } from '../lib/fixtures.js';
+import { clientIds, FIXED_CLIENTS } from '../lib/fixtures.js';
 import { GRANT_VIOLATIONS_SQL, textLiteral } from '../lib/sqlprobe.js';
+import { ROW_TABLES, settleRows } from '../lib/rows.js';
 
 const SWEEP_PAGES = 20;
 
@@ -79,28 +83,31 @@ export const procedures = [{
     });
 
     await attempt(ctx, 'C.rows_reported', async (check) => {
-      const noteIds = outstanding.filter((e) => e.kind === 'notes' && Number.isInteger(e.noteId)).map((e) => e.noteId);
-      if (noteIds.length > 0 && ctx.actions.has('cleanup_sql')) {
-        await ctx.hosted.management.exec(`delete from app.notes where id = any(array[${noteIds.join(',')}]::bigint[])`);
-        for (const e of outstanding.filter((x) => x.kind === 'notes')) ctx.ledger.removed('notes', e.key, { noteId: e.noteId ?? null });
-      }
-      const remainingNotes = noteIds.length === 0 ? 0 : Number(await ctx.hosted.management.read(
-        `select pg_catalog.count(*)::text as result from app.notes where id = any(array[${noteIds.join(',')}]::bigint[])`));
-      const ids = Object.values(clientIds(ctx.runId)).filter((id) => id !== 'rls-demo');
+      const rows = {};
+      for (const kind of Object.keys(ROW_TABLES)) rows[kind] = await settleRows(ctx, kind);
+      ctx.observe('consumer rows of this run', rows);
+      const ids = Object.values(clientIds(ctx.runId)).filter((id) => !FIXED_CLIENTS.includes(id));
       const list = `array[${ids.map((id) => textLiteral(id)).join(', ')}]`;
       const users = outstanding.filter((e) => e.kind === 'user' && e.id).map((e) => uuidLit(e.id));
       const userList = users.length > 0 ? `array[${users.join(', ')}]` : `array[]::uuid[]`;
-      const kit = await ctx.hosted.management.read(`select jsonb_build_object(
-        'clients', (select pg_catalog.count(*) from auth_kit_private.clients where client_id = any(${list})),
-        'memberships', (select pg_catalog.count(*) from auth_kit_private.memberships where client_id = any(${list}) or user_id = any(${userList})),
-        'enrollments', (select pg_catalog.count(*) from auth_kit_private.enrollments where client_id = any(${list}) or user_id = any(${userList})),
-        'membership_events', (select pg_catalog.count(*) from auth_kit_private.membership_events where client_id = any(${list}) or user_id = any(${userList})),
-        'request_log', (select pg_catalog.count(*) from auth_kit_private.request_log where client_id = any(${list})),
-        'profiles', (select pg_catalog.count(*) from auth_kit.profiles where user_id = any(${userList})))::text as result`);
-      ctx.state.residue = { notes: remainingNotes, kit };
+      let kit = null;
+      try {
+        kit = await ctx.hosted.management.read(`select jsonb_build_object(
+          'clients', (select pg_catalog.count(*) from auth_kit_private.clients where client_id = any(${list})),
+          'memberships', (select pg_catalog.count(*) from auth_kit_private.memberships where client_id = any(${list}) or user_id = any(${userList})),
+          'enrollments', (select pg_catalog.count(*) from auth_kit_private.enrollments where client_id = any(${list}) or user_id = any(${userList})),
+          'membership_events', (select pg_catalog.count(*) from auth_kit_private.membership_events where client_id = any(${list}) or user_id = any(${userList})),
+          'request_log', (select pg_catalog.count(*) from auth_kit_private.request_log where client_id = any(${list})),
+          'profiles', (select pg_catalog.count(*) from auth_kit.profiles where user_id = any(${userList})))::text as result`);
+      } catch (error) {
+        ctx.observe('kit residue unreadable', { stage: error?.stage ?? null, status: error?.status ?? null });
+      }
+      const remaining = Object.fromEntries(Object.entries(rows).map(([kind, r]) => [kind, r.remaining]));
+      ctx.state.residue = { rows: remaining, kit };
       ctx.observe('residue after cleanup (kit rows are append-only by design)', ctx.state.residue);
-      check.assert('residue counted', true, typeof kit === 'object' && kit !== null);
-      if (ctx.actions.has('cleanup_sql')) check.assert('this run\'s notes deleted', 0, remainingNotes);
+      check.assert('kit residue counted', true, typeof kit === 'object' && kit !== null);
+      check.assert('every consumer row count known (never assumed zero)', [], Object.keys(remaining).filter((kind) => remaining[kind] === null));
+      if (ctx.actions.has('cleanup_sql')) check.assert('this run\'s consumer rows deleted', Object.fromEntries(Object.keys(rows).map((k) => [k, 0])), remaining);
     });
   },
 }];

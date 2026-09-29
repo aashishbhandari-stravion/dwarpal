@@ -1030,13 +1030,19 @@ begin
     end loop;
   end loop;
 
-  -- A live client keeps at least one assigned manager (I5).
+  -- A live client keeps at least one assigned manager (I5). The refusal names
+  -- the affected holders: every current holder of a manager role.
   if p_state = 'live' and not exists (
        select 1 from jsonb_object_keys(v_next_roles) as k
         where v_next_roles -> k -> 'manages_members' = 'true'::jsonb
           and v_before_roles -> k -> 'manages_members' = 'true'::jsonb
           and v_holders ? k) then
-    v_refusals := v_refusals || '[{"rule": "no_manager_would_remain"}]'::jsonb;
+    v_refusals := v_refusals || jsonb_build_array(jsonb_build_object('rule', 'no_manager_would_remain', 'holders',
+      (select coalesce(jsonb_agg(u.id order by u.id collate "C"), '[]'::jsonb)
+         from (select distinct e.id
+                 from jsonb_object_keys(v_before_roles) as k,
+                      jsonb_array_elements_text(coalesce(v_holders -> k, '[]'::jsonb)) as e(id)
+                where v_before_roles -> k -> 'manages_members' = 'true'::jsonb) as u)));
   end if;
 
   return jsonb_build_object('changed', jsonb_array_length(v_diff) > 0, 'diff', v_diff, 'refusals', v_refusals);

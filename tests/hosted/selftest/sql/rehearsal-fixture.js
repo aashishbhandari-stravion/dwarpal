@@ -18,7 +18,7 @@ import { totp } from '../../lib/totp.js';
 
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const COLUMN = /^[a-z_]{1,40}$/;
-const TABLES = { auth_kit: new Set(['profiles', 'public_clients']), app: new Set(['notes']) };
+const TABLES = { auth_kit: new Set(['profiles', 'public_clients']), app: new Set(['notes', 'orders']) };
 
 function base32(bytes) {
   let bits = 0;
@@ -35,7 +35,7 @@ function base32(bytes) {
   return bits > 0 ? out + BASE32[(value << (5 - bits)) & 31] : out;
 }
 
-export async function createRehearsal(db, { policiesSql }) {
+export async function createRehearsal(db, { policiesSql, extraSql = [], allowList = [] }) {
   const fake = await createFakeSupabase();
   await fake.listen();
   fake.rpc = pgRpc(db);
@@ -43,13 +43,14 @@ export async function createRehearsal(db, { policiesSql }) {
   fake.postgrestSchemas = 'public, graphql_public, auth_kit, app';
   fake.authConfig = {
     ...fake.authConfig, mfa_totp_enroll_enabled: true, mfa_totp_verify_enabled: true, mailer_autoconfirm: false, jwt_exp: 1800,
-    external_google_enabled: false, smtp_host: '', smtp_admin_email: '',
+    external_google_enabled: false, smtp_host: '', smtp_admin_email: '', uri_allow_list: allowList.join(','),
   };
   let offset = 0;
   fake.now = () => Date.now() + offset;
   const clock = { now: () => Date.now() + offset, sleep: async (ms) => { offset += Math.max(0, ms); } };
   const postgres = await db.connection('postgres');
   await postgres.query(policiesSql);
+  for (const sql of extraSql) await postgres.query(sql);
 
   async function actorFor(request) {
     const apikey = request.headers.get('apikey');

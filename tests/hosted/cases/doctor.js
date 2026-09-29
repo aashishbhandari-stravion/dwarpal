@@ -1,8 +1,11 @@
 // L33 doctor modes under Max's D1 amendment A: with only the secret key the
 // privileged catalog checks are not_run and the report is incomplete; with
-// the Management token catalog mode inspects the real catalog; --probe adds
-// a separately reported disposable-user mode. Two deliberate widenings are
-// applied for the detection cases and always revoked:
+// the Management token and the consumer config, complete catalog mode
+// inspects the real catalog including the redirect allow-list and the
+// client registration (both only run with --config, so the config is a
+// required input and each named check must have run and passed); --probe
+// adds a separately reported disposable-user mode. Two deliberate widenings
+// are applied for the detection cases and always revoked:
 //
 //   W1  SELECT on a private table to authenticated: visible to the catalog
 //       only (no probe call can observe it)
@@ -10,9 +13,10 @@
 //       authenticated: visible to both modes (the probe's null-argument call
 //       then reaches the implementation and is refused as invalid_argument)
 
-import path from 'node:path';
 import { attempt, requireAction } from '../lib/world.js';
+import { readDoctorConfig } from '../lib/target.js';
 import { GRANT_VIOLATIONS_SQL } from '../lib/sqlprobe.js';
+import { Blocked } from '../lib/status.js';
 
 export const WIDENINGS = Object.freeze({
   W1: {
@@ -28,6 +32,9 @@ export const WIDENINGS = Object.freeze({
 });
 
 const CATALOG_IDS = ['schema_version', 'grants', 'memberships_without_events', 'exposed_schemas'];
+// Run only when doctor has a consumer config; required for complete catalog proof.
+const CONFIG_IDS = ['redirect_allow_list', 'client_registration'];
+const COMPLETE_IDS = [...CATALOG_IDS, ...CONFIG_IDS];
 const PROBE_IDS = ['probe_sign_in', 'probe_authenticated_effective_access', 'probe_authenticated_operator_wrapper', 'probe_authenticated_private_schema',
   'probe_anon_user_wrapper', 'probe_anon_helper', 'probe_anon_private_schema', 'probe_sign_out'];
 
@@ -54,8 +61,10 @@ export const procedures = [{
   requiresTargets: ['T.identity', 'T.signing_keys', 'T.schema'],
   async run(ctx) {
     const probeUser = await ctx.actors.user('probe_user');
-    const configArgs = [];
-    if (ctx.descriptor.doctor?.configFile) configArgs.push('--config', path.resolve(ctx.descriptor.doctor.configFile));
+    const doctorConfig = readDoctorConfig(ctx.descriptor);
+    ctx.observe('doctor consumer config', doctorConfig.problem ? { present: false, problem: doctorConfig.problem } : { present: true, clientId: doctorConfig.config.clientId });
+    const configArgs = doctorConfig.file ? ['--config', doctorConfig.file] : [];
+    const catalogIds = doctorConfig.file ? COMPLETE_IDS : CATALOG_IDS;
     const doctor = async (args, opts) => {
       const r = await ctx.hosted.cli(['doctor', ...configArgs, ...args], opts);
       ctx.observe(`doctor ${args.join(' ') || '(catalog)'}${opts?.management === false ? ' without Management token' : ''}`, { exit: r.code, report: r.json });
@@ -67,18 +76,31 @@ export const procedures = [{
     await attempt(ctx, 'L33.secret_only_incomplete', async (check) => {
       const r = await doctor([], { management: false });
       check.assert('exit 5 and status incomplete', { exit: 5, status: 'incomplete' }, { exit: r.code, status: r.json?.status });
-      check.assert('privileged catalog checks not_run', Object.fromEntries(CATALOG_IDS.map((id) => [id, 'not_run'])), statuses(r.json, CATALOG_IDS));
-      check.assert('reason is the missing Management token', true, r.json?.checks?.filter((c) => CATALOG_IDS.includes(c.id)).every((c) => c.reason === 'management_token_missing'));
+      check.assert('privileged catalog checks not_run', Object.fromEntries(catalogIds.map((id) => [id, 'not_run'])), statuses(r.json, catalogIds));
+      check.assert('reason is the missing Management token', true, r.json?.checks?.filter((c) => catalogIds.includes(c.id)).every((c) => c.reason === 'management_token_missing'));
       check.assert('public signing-key check ran', { status: 'ok', mode: 'public' }, { status: statuses(r.json, ['signing_keys']).signing_keys, mode: modeOf(r.json, 'signing_keys') });
       check.assert('no actor probe claimed', false, r.json?.probeRan);
     });
 
-    await attempt(ctx, 'L33.catalog_ok', async (check) => {
+    // Complete catalog proof needs the consumer config; the static gate blocks
+    // these cases without it, and this guard keeps that true for any caller.
+    const complete = async (id, fn) => attempt(ctx, id, async (check) => {
+      if (!doctorConfig.file) throw new Blocked(doctorConfig.problem);
+      await fn(check);
+    });
+    const assertComplete = (check, r) => {
+      check.assert('every catalog check, redirect allow-list and client registration included, ran and passed',
+        Object.fromEntries(COMPLETE_IDS.map((id) => [id, 'ok'])), statuses(r.json, COMPLETE_IDS));
+      check.assert('each reported in catalog mode', true, COMPLETE_IDS.every((id) => modeOf(r.json, id) === 'catalog'));
+    };
+
+    await complete('L33.catalog_ok', async (check) => {
       const r = await doctor([]);
       check.assert('exit 0 and status ok', { exit: 0, status: 'ok' }, { exit: r.code, status: r.json?.status });
-      check.assert('catalog checks ran and passed', Object.fromEntries(CATALOG_IDS.map((id) => [id, 'ok'])), statuses(r.json, CATALOG_IDS));
-      check.assert('catalog checks reported in catalog mode', true, CATALOG_IDS.every((id) => modeOf(r.json, id) === 'catalog'));
+      assertComplete(check, r);
       check.assert('no violations', 0, r.json?.checks?.find((c) => c.id === 'grants')?.violationCount);
+      check.assert('no missing redirect route, no wildcard entry', { missingRoutes: [], wildcardEntries: 0 },
+        (({ missingRoutes, wildcardEntries }) => ({ missingRoutes, wildcardEntries }))(r.json?.checks?.find((c) => c.id === 'redirect_allow_list') ?? {}));
     });
 
     await attempt(ctx, 'L33.probe_mode', async (check) => {
@@ -99,7 +121,7 @@ export const procedures = [{
         await ctx.hosted.management.exec(WIDENINGS[key].grant);
         ctx.ledger.created('grant_widening', key);
       }
-      await attempt(ctx, 'L33.catalog_detects_widening', async (check) => {
+      await complete('L33.catalog_detects_widening', async (check) => {
         const r = await doctor([]);
         check.assert('exit 1 and status fail', { exit: 1, status: 'fail' }, { exit: r.code, status: r.json?.status });
         const violations = r.json?.checks?.find((c) => c.id === 'grants')?.violations ?? [];
@@ -116,10 +138,11 @@ export const procedures = [{
     } finally {
       await revertWidenings(ctx, applied);
     }
-    await attempt(ctx, 'L33.widening_reverted', async (check) => {
+    await complete('L33.widening_reverted', async (check) => {
       check.assert('grant assertion empty again', 0, Number(await ctx.hosted.management.read(GRANT_VIOLATIONS_SQL)));
       const r = await doctor([]);
       check.assert('catalog mode ok again', { exit: 0, status: 'ok' }, { exit: r.code, status: r.json?.status });
+      assertComplete(check, r);
     });
   },
 }];

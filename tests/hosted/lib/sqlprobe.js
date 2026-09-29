@@ -175,4 +175,16 @@ export const RLS_CONSUMER_SQL = `select jsonb_build_object(
     'policies', coalesce((select jsonb_agg(p.policyname order by p.policyname) from pg_catalog.pg_policies p
                            where p.schemaname = 'app' and p.tablename = 'notes'), '[]'::jsonb))::text as result`;
 
+/** The L26 orders fixture (tests/hosted/fixtures/orders-consumer/policies.sql) as installed. */
+export const ORDERS_CONSUMER_SQL = `select case when pg_catalog.to_regclass('app.orders') is null then '{"table": false}' else jsonb_build_object(
+    'table', true,
+    'rls', (select c.relrowsecurity and c.relforcerowsecurity from pg_catalog.pg_class c where c.oid = pg_catalog.to_regclass('app.orders')),
+    'policies', coalesce((select jsonb_agg(p.policyname order by p.policyname) from pg_catalog.pg_policies p
+                           where p.schemaname = 'app' and p.tablename = 'orders'), '[]'::jsonb),
+    'qual', coalesce((select p.qual from pg_catalog.pg_policies p where p.schemaname = 'app' and p.tablename = 'orders' and p.policyname = 'orders_select'), ''),
+    'authenticated', (select jsonb_agg(x.priv order by x.priv) from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as x(priv)
+                       where pg_catalog.has_table_privilege('authenticated', 'app.orders', x.priv)),
+    'anon', (select jsonb_agg(x.priv order by x.priv) from unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as x(priv)
+              where pg_catalog.has_table_privilege('anon', 'app.orders', x.priv)))::text end as result`;
+
 export const GRANT_VIOLATIONS_SQL = `select pg_catalog.count(*)::text as result from auth_kit_private.grant_violations()`;

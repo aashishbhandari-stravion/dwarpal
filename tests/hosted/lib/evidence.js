@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { evidenceLocationProblem } from './paths.js';
+import { evidenceLocationProblem, canonicalPath } from './paths.js';
 
 export class EvidenceError extends Error {
   constructor(reason) {
@@ -36,13 +36,21 @@ export class Evidence {
   constructor(dir, redactor, { root } = {}) {
     const problem = evidenceLocationProblem(dir, root);
     if (problem) throw new EvidenceError(problem);
+    const expected = canonicalPath(dir);
     try {
-      fs.mkdirSync(path.dirname(path.resolve(dir)), { recursive: true, mode: 0o700 });
-      fs.mkdirSync(dir, { mode: 0o700 });
+      fs.mkdirSync(path.dirname(expected), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(expected, { mode: 0o700 });
     } catch (error) {
       throw new EvidenceError(error?.code === 'EEXIST' ? 'directory_exists' : 'directory_unwritable');
     }
-    this.dir = path.resolve(dir);
+    // The directory is written only where it was checked to be: a link
+    // swapped in on the way while it was created is caught here.
+    const real = fs.realpathSync.native(dir);
+    if (real !== expected || evidenceLocationProblem(real, root) !== null) {
+      try { fs.rmdirSync(expected); } catch { /* reported below */ }
+      throw new EvidenceError('location_changed');
+    }
+    this.dir = real;
     this.redactor = redactor;
     this.lines = new Map();
     this.finalized = false;

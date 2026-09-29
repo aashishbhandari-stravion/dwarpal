@@ -1,11 +1,12 @@
 // Target prerequisites (T.*). Read-only: signing keys, Auth settings,
 // Management API reachability and the SQL probe channel, installed schema,
-// exposed schemas and the example consumer's policies. The owner installs
+// exposed schemas, the example consumer's policies and the L26 orders
+// fixture. The owner installs
 // and configures all of these; the harness only checks them.
 
 import { readMigrations, DEFAULT_MIGRATIONS_DIR } from '../../../packages/server/lib/migrate.js';
 import { attempt } from '../lib/world.js';
-import { ANON_CLAIMS, MEMBERSHIP_SQL, GRANT_VIOLATIONS_SQL, RLS_CONSUMER_SQL } from '../lib/sqlprobe.js';
+import { ANON_CLAIMS, MEMBERSHIP_SQL, GRANT_VIOLATIONS_SQL, RLS_CONSUMER_SQL, ORDERS_CONSUMER_SQL } from '../lib/sqlprobe.js';
 
 export const CALLBACK_PATH = '/hosted/callback';
 
@@ -61,6 +62,15 @@ export const procedures = [{
       const state = await hosted.management.read(RLS_CONSUMER_SQL);
       check.assert('app.notes exists with forced RLS', { table: true, rls: true }, { table: state.table, rls: state.rls });
       check.assert('the four example policies', ['notes_delete', 'notes_insert', 'notes_select', 'notes_update'], state.policies);
+    });
+
+    await attempt(ctx, 'T.orders_consumer', async (check) => {
+      const state = await hosted.management.read(ORDERS_CONSUMER_SQL);
+      check.assert('app.orders exists with forced RLS', { table: true, rls: true }, { table: state.table, rls: state.rls ?? false });
+      check.assert('one policy, orders_select', ['orders_select'], state.policies ?? []);
+      const qual = String(state.qual ?? '');
+      check.assert('the policy names orders-demo and both order keys', true, ['orders-demo', 'orders:read:any', 'orders:read:own', 'auth.uid()'].every((part) => qual.includes(part)));
+      check.assert('authenticated may only SELECT; anon nothing', { authenticated: ['SELECT'], anon: null }, { authenticated: state.authenticated ?? null, anon: state.anon ?? null });
     });
 
     await attempt(ctx, 'T.auth_settings', async (check) => {

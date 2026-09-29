@@ -1,5 +1,7 @@
 // L32 bootstrap-manager lookups against the real Auth admin API (design 4.1,
-// R5). The CLI runs as a child process with credentials in its environment
+// R5). Two confirmed users with one address is not a valid hosted state
+// (the owner's disposition, 2026-09-29): `ambiguous_user` stays a unit/CLI test
+// with an injected listing and is neither attempted nor counted here. The CLI runs as a child process with credentials in its environment
 // only. The forced small-page listing (page size 1, cap 2) uses the same
 // scan the CLI uses, because the CLI's page size is fixed.
 
@@ -35,21 +37,6 @@ export const procedures = [{
       const r = await cli(['--email', ctx.actors.email('nobody'), '--request-id', id]);
       check.assert('refused unknown_user', { exit: 1, result: null, error: 'unknown_user' }, outcome(r));
       check.assert('nothing written', { request_log: 0, membership_events: 0 }, (({ request_log, membership_events }) => ({ request_log, membership_events }))(await counts(ctx, { requestId: id })));
-    });
-
-    await attempt(ctx, 'L32.email_two_matches', async (check) => {
-      const first = await ctx.actors.user('dup_one');
-      ctx.ledger.intent('user', 'dup_two');
-      const second = await ctx.hosted.admin.createUserRaw(first.email.toUpperCase(), `${randomUUID()}Aa1`);
-      ctx.observe('L32 second user with the same address (different case)', { status: second.status, errorCode: second.errorCode, created: second.id !== null });
-      if (second.id === null) {
-        ctx.ledger.removed('user', 'dup_two', { reason: 'never_created' });
-        ctx.notRun('L32.email_two_matches', 'platform_precludes', 'Auth refused a second user with the same address; ambiguous_user is covered by unit tests only');
-        return;
-      }
-      ctx.ledger.created('user', 'dup_two', { id: second.id });
-      const r = await cli(['--email', first.email, '--request-id', randomUUID()]);
-      check.assert('refused ambiguous_user', { exit: 1, result: null, error: 'ambiguous_user' }, outcome(r));
     });
 
     await attempt(ctx, 'L32.lookup_incomplete', async (check) => {
