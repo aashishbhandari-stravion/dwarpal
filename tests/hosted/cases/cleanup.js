@@ -3,11 +3,13 @@
 // admin API; a user whose create answer was lost is found again by its
 // regenerated address. Widened grants and fault triggers are reverted.
 // Consumer rows (notes, orders) are found by the run marker in their title,
-// including one whose insert answer was lost, deleted only with
-// `cleanup_sql`, and counted again; an unknown count fails the case rather
-// than reading as zero (lib/rows.js). Kit rows of the run's clients cannot
-// be deleted through any kit function (enrollments and events are
-// append-only by design); they are counted and reported.
+// including one whose insert answer was lost or which the ledger never
+// recorded, deleted only with `cleanup_sql`, and counted again; an unknown
+// or malformed count fails the case rather than reading as zero
+// (lib/rows.js). The catalog and kit counts below are held to the same
+// rule. Kit rows of the run's clients cannot be deleted through any kit
+// function (enrollments and events are append-only by design); they are
+// counted and reported.
 
 import { attempt, uuidLit } from '../lib/world.js';
 import { emailFor } from '../lib/actors.js';
@@ -16,9 +18,10 @@ import { faultSql } from './enrollment.js';
 import { smtpAddress } from './providers.js';
 import { clientIds, FIXED_CLIENTS } from '../lib/fixtures.js';
 import { GRANT_VIOLATIONS_SQL, textLiteral } from '../lib/sqlprobe.js';
-import { ROW_TABLES, settleRows } from '../lib/rows.js';
+import { ROW_TABLES, knownCount, settleRows } from '../lib/rows.js';
 
 const SWEEP_PAGES = 20;
+const KIT_COUNTS = Object.freeze(['clients', 'memberships', 'enrollments', 'membership_events', 'request_log', 'profiles']);
 
 async function findByEmail(ctx, email) {
   for (let page = 1; page <= SWEEP_PAGES; page += 1) {
@@ -77,8 +80,8 @@ export const procedures = [{
         await ctx.hosted.management.exec(fault.drop);
         if (await ctx.hosted.management.read(fault.present) === false) ctx.ledger.removed('fault_trigger', entry.key);
       }
-      check.assert('grant assertion empty', 0, Number(await ctx.hosted.management.read(GRANT_VIOLATIONS_SQL)));
-      check.assert('no harness fault schema remains', 0, Number(await ctx.hosted.management.read(
+      check.assert('grant assertion empty', 0, knownCount(await ctx.hosted.management.read(GRANT_VIOLATIONS_SQL)));
+      check.assert('no harness fault schema remains', 0, knownCount(await ctx.hosted.management.read(
         `select pg_catalog.count(*)::text as result from pg_catalog.pg_namespace where nspname like 'hv\\_fault\\_%'`)));
     });
 
@@ -105,8 +108,9 @@ export const procedures = [{
       const remaining = Object.fromEntries(Object.entries(rows).map(([kind, r]) => [kind, r.remaining]));
       ctx.state.residue = { rows: remaining, kit };
       ctx.observe('residue after cleanup (kit rows are append-only by design)', ctx.state.residue);
-      check.assert('kit residue counted', true, typeof kit === 'object' && kit !== null);
-      check.assert('every consumer row count known (never assumed zero)', [], Object.keys(remaining).filter((kind) => remaining[kind] === null));
+      check.assert('kit residue counted', true, typeof kit === 'object' && kit !== null && !Array.isArray(kit)
+        && KIT_COUNTS.every((k) => knownCount(kit[k]) !== null));
+      check.assert('every consumer row count known (never assumed zero)', [], Object.keys(remaining).filter((kind) => knownCount(remaining[kind]) === null));
       if (ctx.actions.has('cleanup_sql')) check.assert('this run\'s consumer rows deleted', Object.fromEntries(Object.keys(rows).map((k) => [k, 0])), remaining);
     });
   },

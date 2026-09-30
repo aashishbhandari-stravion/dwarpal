@@ -20,14 +20,14 @@ import { Ledger } from '../lib/ledger.js';
 import { createGate, NetworkClosedError } from '../lib/net.js';
 import { totp, hotp, base32Decode } from '../lib/totp.js';
 import { runProcedures } from '../lib/runner.js';
-import { parseProbe, nullCall, probeStatement } from '../lib/sqlprobe.js';
+import { GRANT_VIOLATIONS_SQL, parseProbe, nullCall, probeStatement } from '../lib/sqlprobe.js';
 import { executionFindings } from '../cases/routing.js';
 import { parseConfirmationLink, smtpAddress } from '../cases/providers.js';
 import { insertNote } from '../cases/policy.js';
 import { ordersGuard } from '../cases/orders.js';
 import { createPrincipal } from '../../../packages/core/index.js';
 import { procedures as cleanupProcedures } from '../cases/cleanup.js';
-import { rowSql, rowTitle, settleRows } from '../lib/rows.js';
+import { knownCount, rowSql, rowTitle, settleRows } from '../lib/rows.js';
 import { main, selectionFor, plan, EXIT } from '../run.js';
 import { PUBLIC_ROOT, credentialFileProblem, evidenceLocationProblem } from '../lib/paths.js';
 import { spawnSync } from 'node:child_process';
@@ -392,18 +392,24 @@ test('the L26 Node guard is the literal S4 sequence: own order by ownership, any
 
 // Consumer-row residue (L06-8) -----------------------------------------------------
 
-/** A target whose app.notes commits inserts; the reply to the first can be lost. Answers only cleanup's exact statements. */
-function rowsTarget({ loseFirstReply = true, readFails = false } = {}) {
-  const table = [];
+const KIT_ZERO = Object.freeze({ clients: 0, memberships: 0, enrollments: 0, membership_events: 0, request_log: 0, profiles: 0 });
+
+/**
+ * A target whose app.notes commits inserts; the reply to the first can be
+ * lost. Answers only cleanup's exact statements, as `management.read` returns
+ * them (the JSON-parsed `result`); `answer(sql)` overrides one answer.
+ */
+function rowsTarget({ loseFirstReply = true, readFails = false, answer = () => undefined } = {}) {
+  const tables = { notes: [], orders: [] };
   let next = 1;
   let lost = !loseFirstReply;
-  const own = (runId) => table.filter((r) => r.title.startsWith(`hv${runId} `));
+  const own = (kind, runId) => tables[kind].filter((r) => r.title.startsWith(`hv${runId} `));
   const statements = [];
   const hosted = {
     rest: {
       async insert(_token, schema, name, row) {
         assert.deepEqual([schema, name], ['app', 'notes']);
-        table.push({ id: next, title: row.title });
+        tables.notes.push({ id: next, title: row.title });
         next += 1;
         if (!lost) {
           lost = true;
@@ -416,32 +422,39 @@ function rowsTarget({ loseFirstReply = true, readFails = false } = {}) {
       async read(sql) {
         statements.push(sql);
         if (readFails) throw new Error('management unavailable');
-        for (const runId of ['r1', 'r2']) {
-          if (sql === rowSql.ids('notes', runId)) return own(runId).map((r) => r.id);
-          if (sql === rowSql.count('notes', runId)) return String(own(runId).length);
+        const override = answer(sql);
+        if (override !== undefined) return override;
+        for (const kind of ['notes', 'orders']) {
+          for (const runId of ['r1', 'r2']) {
+            if (sql === rowSql.ids(kind, runId)) return own(kind, runId).map((r) => r.id);
+            if (sql === rowSql.count(kind, runId)) return own(kind, runId).length;
+          }
         }
-        if (sql.includes("'clients'")) return { clients: 0 };
-        if (sql === rowSql.ids('orders', 'r1') || sql === rowSql.count('orders', 'r1')) throw new Error('no order intents: never asked');
-        return '0';
+        if (sql.includes("'clients'")) return { ...KIT_ZERO };
+        return 0;
       },
       async exec(sql) {
         statements.push(sql);
-        for (const runId of ['r1', 'r2']) {
-          if (sql === rowSql.remove('notes', runId)) {
-            for (const r of own(runId)) table.splice(table.indexOf(r), 1);
-            return;
+        for (const kind of ['notes', 'orders']) {
+          for (const runId of ['r1', 'r2']) {
+            if (sql === rowSql.remove(kind, runId)) {
+              for (const r of own(kind, runId)) tables[kind].splice(tables[kind].indexOf(r), 1);
+              return;
+            }
           }
         }
         throw new Error(`unexpected statement ${sql}`);
       },
     },
   };
-  return { table, hosted, statements };
+  return { table: tables.notes, tables, hosted, statements };
 }
 
 function rowsCtx(dir, hosted, actions, runId = 'r1') {
   return { hosted, runId, actions: new Set(actions), ledger: new Ledger(path.join(dir, 'ledger.jsonl')), observe: () => {} };
 }
+
+const settledShape = ({ foundByMarker, recoveredByMarker, deleted, remaining, reason }) => ({ foundByMarker, recoveredByMarker, deleted, remaining, reason });
 
 test('a note whose insert answer was lost is found by its run marker, never reported as zero (L06-8)', async () => {
   const dir = tmp();
@@ -456,6 +469,7 @@ test('a note whose insert answer was lost is found by its run marker, never repo
   const noSql = await settleRows(ctx, 'notes');
   assert.deepEqual(noSql, { kind: 'notes', intents: 2, knownIds: 1, foundByMarker: 2, recoveredByMarker: 1, deleted: false, remaining: 2, reason: 'cleanup_sql_not_authorized' });
   assert.deepEqual(ctx.ledger.outstanding().map((e) => [e.key, e.op]), [['rls_member', 'residue'], ['rls_staff', 'residue']]);
+  assert.equal(target.statements.filter((s) => s.startsWith('delete')).length, 0);
 
   // An unreadable target: unknown, not zero; still outstanding.
   const blind = rowsCtx(dir, rowsTarget({ readFails: true }).hosted, ['connect', 'cleanup_sql']);
@@ -466,15 +480,75 @@ test('a note whose insert answer was lost is found by its run marker, never repo
   const rerunDir = tmp();
   fs.copyFileSync(path.join(dir, 'ledger.jsonl'), path.join(rerunDir, 'ledger.jsonl'));
   const rerun = rowsCtx(rerunDir, target.hosted, ['connect', 'cleanup_sql']);
-  const settled = await settleRows(rerun, 'notes');
-  assert.deepEqual((({ foundByMarker, recoveredByMarker, deleted, remaining }) => ({ foundByMarker, recoveredByMarker, deleted, remaining }))(settled),
-    { foundByMarker: 2, recoveredByMarker: 1, deleted: true, remaining: 0 });
+  assert.deepEqual(settledShape(await settleRows(rerun, 'notes')), { foundByMarker: 2, recoveredByMarker: 1, deleted: true, remaining: 0, reason: null });
   assert.deepEqual(target.table, [{ id: 99, title: rowTitle('r2', 'rls_member') }]);
   assert.deepEqual(rerun.ledger.outstanding(), []);
-  // Nothing left to settle on a second rerun, and no query is needed for it.
+
+  // A second rerun, every entry already removed: the target is still asked by marker, and the count it answers is the result.
   const before = target.statements.length;
-  assert.equal((await settleRows(rerun, 'notes')).remaining, 0);
-  assert.equal(target.statements.length, before);
+  assert.deepEqual(settledShape(await settleRows(rerun, 'notes')), { foundByMarker: 0, recoveredByMarker: 0, deleted: false, remaining: 0, reason: null });
+  assert.deepEqual(target.statements.slice(before), [rowSql.ids('notes', 'r1'), rowSql.count('notes', 'r1')]);
+
+  // A marker row that reappears after that (a late commit): found, deleted, recounted; the other run's note kept.
+  target.table.push({ id: 40, title: rowTitle('r1', 'rls_member') });
+  assert.deepEqual(settledShape(await settleRows(rerun, 'notes')), { foundByMarker: 1, recoveredByMarker: 1, deleted: true, remaining: 0, reason: null });
+  assert.deepEqual(target.table, [{ id: 99, title: rowTitle('r2', 'rls_member') }]);
+  assert.deepEqual(rerun.ledger.outstanding(), []);
+});
+
+test('a null, false, text, array or other malformed count is unknown, never zero (L06-8, first reproduction)', async () => {
+  assert.deepEqual([0, 3, Number.MAX_SAFE_INTEGER].map(knownCount), [0, 3, Number.MAX_SAFE_INTEGER]);
+  for (const bad of [null, false, true, '', '0', '3', [], [0], {}, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
+    const dir = tmp();
+    // A write-ahead note intent, the marker lookup answers [] and the count answers `bad`.
+    const target = rowsTarget({ answer: (sql) => (sql === rowSql.count('notes', 'r1') ? bad : undefined) });
+    const ctx = rowsCtx(dir, target.hosted, ['connect', 'cleanup_sql']);
+    ctx.ledger.intent('notes', 'rls_member', {});
+    const settled = await settleRows(ctx, 'notes');
+    assert.deepEqual(settledShape(settled), { foundByMarker: 0, recoveredByMarker: 0, deleted: false, remaining: null, reason: 'unverified' }, `count answer ${JSON.stringify(bad)}`);
+    assert.deepEqual(ctx.ledger.outstanding().map((e) => [e.key, e.op, e.reason]), [['rls_member', 'residue', 'unverified']]);
+  }
+  // A malformed id list is unknown too, and nothing is deleted on it.
+  for (const bad of [null, false, 'x', [1, null], [1.5], [-1], {}]) {
+    const target = rowsTarget({ answer: (sql) => (sql === rowSql.ids('notes', 'r1') ? bad : undefined) });
+    target.table.push({ id: 7, title: rowTitle('r1', 'rls_member') });
+    const ctx = rowsCtx(tmp(), target.hosted, ['connect', 'cleanup_sql']);
+    assert.deepEqual(settledShape(await settleRows(ctx, 'notes')), { foundByMarker: null, recoveredByMarker: null, deleted: false, remaining: null, reason: 'unverified' });
+    assert.equal(target.table.length, 1);
+  }
+});
+
+test('marker rows are counted with no ledger entry of their kind; another run is untouched (L06-8, second reproduction)', async () => {
+  const dir = tmp();
+  const target = rowsTarget();
+  target.table.push({ id: 17, title: rowTitle('r1', 'rls_member') }, { id: 99, title: rowTitle('r2', 'rls_member') });
+  target.tables.orders.push({ id: 5, title: rowTitle('r1', 'ord_own_order') }, { id: 6, title: rowTitle('r2', 'ord_own_order') });
+  const ctx = rowsCtx(dir, target.hosted, ['connect']);
+  assert.deepEqual(ctx.ledger.outstanding(), []);
+
+  // Without cleanup_sql: reported, nothing deleted, recorded as unledgered residue.
+  for (const kind of ['notes', 'orders']) {
+    assert.deepEqual(settledShape(await settleRows(ctx, kind)), { foundByMarker: 1, recoveredByMarker: 1, deleted: false, remaining: 1, reason: 'cleanup_sql_not_authorized' });
+  }
+  assert.ok(target.statements.includes(rowSql.ids('notes', 'r1')) && target.statements.includes(rowSql.ids('orders', 'r1')));
+  assert.equal(target.statements.filter((s) => s.startsWith('delete')).length, 0);
+  assert.deepEqual(ctx.ledger.outstanding().map((e) => [e.kind, e.key, e.op, e.reason]),
+    [['notes', 'unledgered', 'residue', 'cleanup_sql_not_authorized'], ['orders', 'unledgered', 'residue', 'cleanup_sql_not_authorized']]);
+
+  // With cleanup_sql: deleted and recounted; the other run's rows kept; the residue entries settle.
+  const sql = rowsCtx(dir, target.hosted, ['connect', 'cleanup_sql']);
+  for (const kind of ['notes', 'orders']) {
+    assert.deepEqual(settledShape(await settleRows(sql, kind)), { foundByMarker: 1, recoveredByMarker: 1, deleted: true, remaining: 0, reason: null });
+  }
+  assert.deepEqual(target.table, [{ id: 99, title: rowTitle('r2', 'rls_member') }]);
+  assert.deepEqual(target.tables.orders, [{ id: 6, title: rowTitle('r2', 'ord_own_order') }]);
+  assert.deepEqual(sql.ledger.outstanding(), []);
+
+  // A delete whose recount is malformed is unknown, not zero.
+  const garbled = rowsTarget({ answer: (s) => (s === rowSql.count('notes', 'r1') ? null : undefined) });
+  garbled.table.push({ id: 18, title: rowTitle('r1', 'rls_member') });
+  const after = await settleRows(rowsCtx(tmp(), garbled.hosted, ['connect', 'cleanup_sql']), 'notes');
+  assert.deepEqual(settledShape(after), { foundByMarker: 1, recoveredByMarker: 1, deleted: true, remaining: null, reason: 'unverified' });
 });
 
 test('C.rows_reported fails on an unknown row count and passes only on a counted zero (L06-8)', async () => {
@@ -483,20 +557,67 @@ test('C.rows_reported fails on an unknown row count and passes only on a counted
     const ctx = rowsCtx(dir, hosted, actions);
     for (const [op, key, data] of ledgerLines) ctx.ledger.write(op, 'notes', key, data);
     const cases = CASES.filter((c) => c.procedure === 'cleanup');
+    const state = {};
     const { records } = await runProcedures({
-      procedures: cleanupProcedures, ctx: { ...ctx, ids: {}, descriptor: {}, state: {} }, selection: null,
+      procedures: cleanupProcedures, ctx: { ...ctx, ids: {}, descriptor: {}, state }, selection: null,
       capabilities: { publishable_key: true, secret_key: true, management_token: true }, actions: ctx.actions, hosted: false,
       evidence: new Evidence(path.join(dir, 'ev'), new Redactor()), cases,
     });
-    return { status: records.get('C.rows_reported').rehearsal?.status, reason: records.get('C.rows_reported').rehearsal?.reason, outer: records.get('C.rows_reported').status };
+    const at = (id) => ({ status: records.get(id).rehearsal?.status, reason: records.get(id).rehearsal?.reason, outer: records.get(id).status });
+    return { ...at('C.rows_reported'), rows: state.residue?.rows ?? null, ledger: ctx.ledger };
   };
+  const all = ['connect', 'create_users', 'cleanup_sql'];
   const lost = [['intent', 'rls_member', {}]];
+  const pick = ({ status, reason, outer }) => ({ status, reason, outer });
   const blind = rowsTarget({ readFails: true });
-  assert.deepEqual(await run(blind.hosted, ['connect', 'create_users', 'cleanup_sql'], lost), { status: 'failed', reason: 'assertion_failed', outer: 'not_run' });
+  assert.deepEqual(pick(await run(blind.hosted, all, lost)), { status: 'failed', reason: 'assertion_failed', outer: 'not_run' });
   const target = rowsTarget();
   target.table.push({ id: 5, title: rowTitle('r1', 'rls_member') });
-  assert.deepEqual(await run(target.hosted, ['connect', 'create_users', 'cleanup_sql'], lost), { status: 'passed', reason: null, outer: 'not_run' });
+  assert.deepEqual(pick(await run(target.hosted, all, lost)), { status: 'passed', reason: null, outer: 'not_run' });
   assert.deepEqual(target.table, []);
+
+  // First reproduction through the case: a null count answer fails it, and the intent stays outstanding.
+  for (const bad of [null, false, '0', []]) {
+    const nulled = rowsTarget({ answer: (sql) => (sql === rowSql.count('notes', 'r1') ? bad : undefined) });
+    const r = await run(nulled.hosted, all, lost);
+    assert.deepEqual({ ...pick(r), rows: r.rows }, { status: 'failed', reason: 'assertion_failed', outer: 'not_run', rows: { notes: null, orders: 0 } });
+    assert.deepEqual(r.ledger.outstanding().map((e) => [e.key, e.op]), [['rls_member', 'residue']]);
+  }
+
+  // Second reproduction through the case: an empty ledger with a late marker row. Deleted with cleanup_sql; reported without.
+  const late = rowsTarget();
+  late.table.push({ id: 17, title: rowTitle('r1', 'late') });
+  const unauthorised = await run(late.hosted, ['connect', 'create_users'], []);
+  assert.deepEqual({ ...pick(unauthorised), rows: unauthorised.rows }, { status: 'passed', reason: null, outer: 'not_run', rows: { notes: 1, orders: 0 } });
+  assert.equal(late.table.length, 1);
+  assert.equal(late.statements.filter((s) => s.startsWith('delete')).length, 0);
+  const settled = await run(late.hosted, all, []);
+  assert.deepEqual({ ...pick(settled), rows: settled.rows }, { status: 'passed', reason: null, outer: 'not_run', rows: { notes: 0, orders: 0 } });
+  assert.deepEqual(late.table, []);
+  // With cleanup_sql, a marker row the delete could not clear fails the case.
+  const stuck = rowsTarget({ answer: (sql) => (sql === rowSql.count('notes', 'r1') ? 1 : undefined) });
+  stuck.table.push({ id: 17, title: rowTitle('r1', 'late') });
+  assert.deepEqual(pick(await run(stuck.hosted, all, [])), { status: 'failed', reason: 'assertion_failed', outer: 'not_run' });
+});
+
+test('C.catalog_restored and the kit residue hold a malformed count to unknown, never zero (L06-8)', async () => {
+  const run = async (answer) => {
+    const dir = tmp();
+    const ctx = rowsCtx(dir, rowsTarget({ answer }).hosted, ['connect', 'create_users', 'cleanup_sql']);
+    const { records } = await runProcedures({
+      procedures: cleanupProcedures, ctx: { ...ctx, ids: {}, descriptor: {}, state: {} }, selection: null,
+      capabilities: { publishable_key: true, secret_key: true, management_token: true }, actions: ctx.actions, hosted: false,
+      evidence: new Evidence(path.join(dir, 'ev'), new Redactor()), cases: CASES.filter((c) => c.procedure === 'cleanup'),
+    });
+    return ['C.catalog_restored', 'C.rows_reported'].map((id) => records.get(id).rehearsal?.status);
+  };
+  assert.deepEqual(await run(() => undefined), ['passed', 'passed']);
+  for (const bad of [null, false, '0', []]) {
+    assert.deepEqual(await run((sql) => (sql === GRANT_VIOLATIONS_SQL ? bad : undefined)), ['failed', 'passed'], `grant count ${JSON.stringify(bad)}`);
+    assert.deepEqual(await run((sql) => (sql.includes('hv\\_fault\\_') ? bad : undefined)), ['failed', 'passed'], `fault schema count ${JSON.stringify(bad)}`);
+    assert.deepEqual(await run((sql) => (sql.includes("'clients'") ? { ...KIT_ZERO, enrollments: bad } : undefined)), ['passed', 'failed'], `kit count ${JSON.stringify(bad)}`);
+  }
+  assert.deepEqual(await run((sql) => (sql.includes("'clients'") ? [] : undefined)), ['passed', 'failed']);
 });
 
 // Pure helpers ---------------------------------------------------------------------

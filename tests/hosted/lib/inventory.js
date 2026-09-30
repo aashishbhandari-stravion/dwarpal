@@ -307,7 +307,7 @@ export const CASES = Object.freeze([
   ...group('cleanup', { needs: WRITE.needs, authorize: ['connect', 'create_users'] }, [
     ['C.users_deleted', 'setup', ['auth'], 'every user in the residue ledger is deleted, or reported'],
     ['C.catalog_restored', 'setup', ['management'], 'no widened grant or fault trigger remains; grant assertion empty', { needs: MGMT.needs }],
-    ['C.rows_reported', 'setup', ['management'], 'remaining rows of this run (notes, kit rows of run clients) counted and reported', { needs: MGMT.needs }],
+    ['C.rows_reported', 'setup', ['management'], 'remaining rows of this run counted and reported: notes and orders by run marker whatever the ledger holds, kit rows of run clients; an unknown count fails', { needs: MGMT.needs }],
   ]),
 ]);
 
