@@ -206,7 +206,7 @@ export type ModelDiffEntry =
 
 export type ModelRefusal =
   | { readonly rule: 'role_held' | 'promotes_holders'; readonly role: RoleKey; readonly holders: readonly string[] }
-  | { readonly rule: 'no_manager_would_remain' };
+  | { readonly rule: 'no_manager_would_remain'; readonly holders: readonly string[] };
 
 export interface ModelChangePlan {
   readonly changed: boolean;

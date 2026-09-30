@@ -7,6 +7,7 @@
 import { readMigrations, DEFAULT_MIGRATIONS_DIR } from '../../../packages/server/lib/migrate.js';
 import { attempt } from '../lib/world.js';
 import { ANON_CLAIMS, MEMBERSHIP_SQL, GRANT_VIOLATIONS_SQL, RLS_CONSUMER_SQL, ORDERS_CONSUMER_SQL } from '../lib/sqlprobe.js';
+import { knownCount } from '../lib/rows.js';
 
 export const CALLBACK_PATH = '/hosted/callback';
 
@@ -48,7 +49,7 @@ export const procedures = [{
       ctx.observe('migration files', files.map((f) => ({ version: f.version, sha256: f.sha256 })));
       const installed = await hosted.management.read(`select coalesce(jsonb_agg(version order by version), '[]'::jsonb)::text as result from auth_kit_private.migrations`);
       check.assert('installed versions equal the repository files', files.map((f) => f.version), installed);
-      check.assert('grant assertion is empty', 0, Number(await hosted.management.read(GRANT_VIOLATIONS_SQL)));
+      check.assert('grant assertion is empty', 0, knownCount(await hosted.management.read(GRANT_VIOLATIONS_SQL)));
     });
 
     await attempt(ctx, 'T.exposed_schemas', async (check) => {

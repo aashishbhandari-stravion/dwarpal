@@ -53,7 +53,7 @@ test('migrate applies the migration once through the Management API and is idemp
     const first = await client.migrate();
     assert.equal(first.applied.length, 1);
     assert.equal(first.applied[0].version, '20260927000000');
-    assert.equal(first.applied[0].sha256, '3d2afcf0ae7bca9b3996c9013d2f19f3757d2408621378c837fb4875a5aee041');
+    assert.equal(first.applied[0].sha256, '6ccba862acec9315b2ef8954dd11c59c967a51672e6c52d4709c7413b033a8d6');
     const [{ n }] = await db.rows("select count(*) as n from auth_kit_private.migrations where version = '20260927000000'");
     assert.equal(n, '1');
     const again = await client.migrate();

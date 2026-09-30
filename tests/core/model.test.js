@@ -155,7 +155,7 @@ test('live client: removing manages_members from the only held manager role is r
   next.roles.boss.manages_members = false;
   next.roles.helper.manages_members = true;
   const plan = planModelChange(base(), next, { state: 'live', holders: { boss: [U1] } });
-  assert.deepEqual(plan.refusals, [{ rule: 'no_manager_would_remain' }]);
+  assert.deepEqual(plan.refusals, [{ rule: 'no_manager_would_remain', holders: [U1] }]);
   // Same change on a registered client with no holders is accepted.
   const registered = planModelChange(base(), next, { state: 'registered', holders: {} });
   assert.deepEqual(registered.refusals, []);
@@ -176,7 +176,21 @@ test('live client with no assigned manager at all is refused; a new manager role
   const next = base();
   next.roles.chief = { manages_members: true, permissions: ['team:manage'] };
   const plan = planModelChange(base(), next, { state: 'live', holders: {} });
-  assert.deepEqual(plan.refusals, [{ rule: 'no_manager_would_remain' }]);
+  assert.deepEqual(plan.refusals, [{ rule: 'no_manager_would_remain', holders: [] }]);
+});
+
+test('last-manager refusal names distinct current manager holders in sorted order (L29)', () => {
+  const current = base();
+  current.roles.helper.manages_members = true;
+  const next = structuredClone(current);
+  next.roles.boss.manages_members = false;
+  next.roles.helper.manages_members = false;
+  next.roles.visitor.manages_members = true;
+  next.roles.visitor.self_assignable = false;
+  const plan = planModelChange(current, next, {
+    state: 'live', holders: { boss: [U2, U1], helper: [U1], visitor: [] },
+  });
+  assert.deepEqual(plan.refusals, [{ rule: 'no_manager_would_remain', holders: [U1, U2] }]);
 });
 
 test('diff annotates reach: future joiners for self-assignable, holders for mappings', () => {
@@ -292,7 +306,7 @@ test('an unheld prototype-named manager role never counts as the last manager', 
     assert.deepEqual(kept.refusals, [], key);
     // Demoting the only held manager role is refused although boss stays a manager role.
     const refused = planModelChange(current, withRole(key, { manages_members: false }), { state: 'live', holders: setOwn({}, key, [U2]) });
-    assert.deepEqual(refused.refusals, [{ rule: 'no_manager_would_remain' }], key);
+    assert.deepEqual(refused.refusals, [{ rule: 'no_manager_would_remain', holders: [U2] }], key);
   }
 });
 

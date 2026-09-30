@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { attempt, ensureClient, counts, uuidLit } from '../lib/world.js';
 import { requestsModel } from '../lib/fixtures.js';
 import { textLiteral } from '../lib/sqlprobe.js';
+import { knownCount } from '../lib/rows.js';
 import { scanForEmail } from '../../../packages/server/lib/lookup.js';
 import { createAdminApi } from '../../../packages/server/lib/admin.js';
 import { isOperatorError } from '../../../packages/server/operator.js';
@@ -18,7 +19,7 @@ async function clientState(ctx, clientId) {
 }
 
 async function membershipCount(ctx, userId, clientId) {
-  return Number(await ctx.hosted.management.read(`select pg_catalog.count(*)::text as result from auth_kit_private.memberships
+  return knownCount(await ctx.hosted.management.read(`select pg_catalog.count(*)::text as result from auth_kit_private.memberships
     where user_id = ${uuidLit(userId)} and client_id = ${textLiteral(clientId)}`));
 }
 

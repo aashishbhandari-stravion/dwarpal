@@ -26,17 +26,7 @@ async function currentModel(db, client) {
   return exported.model_json === null ? null : JSON.parse(exported.model_json);
 }
 
-/** Current holders of the client's manager roles, deduplicated and sorted (the L29 affected holders). */
-function managerHolders(current, held) {
-  const ids = Object.keys(current?.roles ?? {}).filter((role) => current.roles[role].manages_members === true).flatMap((role) => held[role] ?? []);
-  return [...new Set(ids)].sort();
-}
-
-/**
- * Dry-run in SQL and planModelChange in core must agree exactly, except that
- * SQL's no_manager_would_remain refusal also names the affected holders
- * (L29), which core's plan does not carry.
- */
+/** Dry-run in SQL and planModelChange in core must agree exactly, including L29 holder lists. */
 async function assertPlanParity(db, client, next, label) {
   const current = await currentModel(db, client);
   const held = await holders(db, client);
@@ -45,8 +35,7 @@ async function assertPlanParity(db, client, next, label) {
   assert.equal(dry.result, 'dry_run', label);
   assert.equal(dry.changed, plan.changed, `${label}: changed`);
   assert.deepEqual(dry.diff, JSON.parse(JSON.stringify(plan.diff)), `${label}: diff`);
-  const expected = JSON.parse(JSON.stringify(plan.refusals)).map((r) => (r.rule === 'no_manager_would_remain' ? { ...r, holders: managerHolders(current, held) } : r));
-  assert.deepEqual(dry.refusals, expected, `${label}: refusals`);
+  assert.deepEqual(dry.refusals, JSON.parse(JSON.stringify(plan.refusals)), `${label}: refusals`);
   return dry;
 }
 

@@ -16,6 +16,7 @@
 import { attempt, requireAction } from '../lib/world.js';
 import { readDoctorConfig } from '../lib/target.js';
 import { GRANT_VIOLATIONS_SQL } from '../lib/sqlprobe.js';
+import { knownCount } from '../lib/rows.js';
 import { Blocked } from '../lib/status.js';
 
 export const WIDENINGS = Object.freeze({
@@ -139,7 +140,7 @@ export const procedures = [{
       await revertWidenings(ctx, applied);
     }
     await complete('L33.widening_reverted', async (check) => {
-      check.assert('grant assertion empty again', 0, Number(await ctx.hosted.management.read(GRANT_VIOLATIONS_SQL)));
+      check.assert('grant assertion empty again', 0, knownCount(await ctx.hosted.management.read(GRANT_VIOLATIONS_SQL)));
       const r = await doctor([]);
       check.assert('catalog mode ok again', { exit: 0, status: 'ok' }, { exit: r.code, status: r.json?.status });
       assertComplete(check, r);

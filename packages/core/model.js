@@ -260,7 +260,14 @@ export function planModelChange(current, next, context) {
     const managerRemains = Object.keys(nxt.roles).some(
       (role) => nxt.roles[role].manages_members && priorRole(role)?.manages_members === true && holderCount(role) > 0,
     );
-    if (!managerRemains) refusals.push({ rule: 'no_manager_would_remain' });
+    if (!managerRemains) {
+      // Name every current manager holder, including a holder of two manager
+      // roles only once. This is the same affected set SQL reports under lock.
+      const affected = sortedUnique(Object.keys(before.roles)
+        .filter((role) => before.roles[role].manages_members)
+        .flatMap(holdersOf));
+      refusals.push({ rule: 'no_manager_would_remain', holders: affected });
+    }
   }
 
   return deepFreeze({ changed: diff.length > 0, diff, refusals, model: nxt });
