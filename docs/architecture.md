@@ -9,38 +9,26 @@ This overview describes the implementation at contract `0.5`. It supplements the
 ```mermaid
 flowchart TB
     subgraph browser["User browser"]
-        UI["Website account pages<br/>Dwarpal controller and optional screens"]
+        UI["Account pages<br/>Dwarpal browser kit"]
     end
     subgraph app["Consuming application"]
-        API["Node endpoint<br/>Dwarpal server library and application guards"]
-        DATA["Application-owned business data<br/>and identity-to-record links"]
+        API["Node endpoint<br/>Dwarpal library and application guards"]
+        DATA["Business data<br/>and identity-to-record links"]
     end
     subgraph operator["Restricted operator environment"]
-        CLI["auth-kit CLI<br/>Model and setup configuration"]
+        CLI["auth-kit CLI"]
     end
     subgraph provider["Supabase project"]
-        AUTH["Supabase Auth<br/>Identity, sessions, providers and MFA"]
-        REST["PostgREST<br/>Exposed auth_kit wrappers"]
-        PRIVATE["Private authorization tables<br/>and controlled SQL implementations"]
-        MGMT["Management API"]
-        ROWS["Optional application tables<br/>with application-defined RLS policies"]
+        SUPA["Auth, PostgREST and PostgreSQL<br/>Identity and authorization state"]
     end
-    UI -->|"Sign-in and account flows"| AUTH
-    UI -->|"Own enrollment and access reads"| REST
-    UI -->|"Bearer token and application request"| API
-    API -->|"Verify token and check live Auth user"| AUTH
-    API -->|"Fresh access; manager actions with user token"| REST
-    API -->|"Application enforces record access"| DATA
-    REST --> PRIVATE
-    CLI -->|"Secret-key operator actions"| REST
-    CLI -->|"Privileged MFA operations"| AUTH
-    CLI -->|"Migrations and catalog diagnostics"| MGMT
-    MGMT --> PRIVATE
-    UI -.->|"Optional direct data path via PostgREST"| ROWS
-    ROWS -->|"RLS calls permission helpers"| PRIVATE
+    UI -->|"Account flows and own access"| SUPA
+    UI -->|"Bearer token and request"| API
+    API -->|"Live Auth and access checks"| SUPA
+    API -->|"Enforce record access"| DATA
+    CLI -->|"Privileged setup and administration"| SUPA
 ```
 
-Arrows show logical calls, not deployment instructions or extra credentials. PostgREST exposes the approved wrappers and selected consumer schemas; it must not expose `auth_kit_private`. Its private SQL implementations are reached through controlled grants and wrappers. See the [callable-surface rules](rbac-lld.md#42-functions-and-who-may-call-them) for the exact HTTP and SQL distinction.
+Arrows show the main responsibilities. The optional direct database path is shown separately below. Operator actions use the Auth, PostgREST or Management API as appropriate. PostgREST exposes the approved wrappers and selected consumer schemas; it must not expose `auth_kit_private`. Its private SQL implementations are reached through controlled grants and wrappers. See the [callable-surface rules](rbac-lld.md#42-functions-and-who-may-call-them) for the exact HTTP and SQL distinction.
 
 | Boundary | Credentials and authority |
 | --- | --- |
