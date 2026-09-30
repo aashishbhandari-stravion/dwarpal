@@ -6,6 +6,8 @@
 
 Dwarpal requires **Supabase, Free plan or above**, and Node 22 or later for the server library and the CLI.
 
+**New to the project?** Read [Start here](docs/start-here.md) for the source setup, a short reading path and integration preparation. The [business requirements](docs/brd.md) describe the agreed scope; the [architecture overview](docs/architecture.md) maps the components and key diagrams.
+
 ## What is in the package
 
 - **Core** (`@briqvent/dwarpal`): contract 0.5, permission evaluation (`can`, `canAll`, `canAny`, `explain`, `requirePermission`, `requireRole`, `requireMfa`), model and client-configuration validators, redirect rules and request fingerprints. No network, database or framework code; it runs in Node 22+ and in browsers. `@briqvent/dwarpal/testing` exports a synthetic fixture so you can test your own guards against the principals the kit is tested with.
@@ -124,6 +126,9 @@ Build tooling is development-only: esbuild builds the prebuilt assets, TypeScrip
 
 ## Documentation
 
+- [Start here](docs/start-here.md): reading order, source setup, component map and integration preparation.
+- [Business requirements](docs/brd.md): purpose, users, current scope, boundaries and acceptance outcomes.
+- [Architecture overview](docs/architecture.md): trust boundaries, component responsibilities, data access paths and an index of key LLD diagrams.
 - [User manual](docs/manual.md): concepts, rules of engagement, integration steps, server and browser usage, errors, operations.
 - [Design](docs/design.md): contract 0.5, the `Principal` shape, the server and SQL surfaces, security decisions and the test plan.
 - [RBAC low-level design](docs/rbac-lld.md): the data model, invariants, sequence diagrams and failure modes.
